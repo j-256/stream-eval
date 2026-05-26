@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """Read-only dashboard for in-flight eval runs.
 
-Walks the system process table for `tools/trigger-eval.py` and
-`tools/synthesis-eval.py` workers, finds their open stream-json
-tempfiles via lsof, and renders a live HTML dashboard backed by
-`http.server` (stdlib only -- no pip install).
+Walks the system process table for `stream-eval trigger` and
+`stream-eval synthesis` workers (also matches the legacy
+`tools/trigger-eval.py` / `tools/synthesis-eval.py` invocations until
+Phase G cutover), finds their open stream-json tempfiles via lsof, and
+renders a live HTML dashboard backed by `http.server` (stdlib only,
+in this Phase-B copy; Phase F rewrites this whole module on Flask +
+Jinja2 + psutil).
 
 Usage:
   # one-shot CLI summary
-  python3 tools/eval-monitor.py
+  stream-eval monitor
 
   # http dashboard at http://localhost:8765
-  python3 tools/eval-monitor.py serve [--port 8765] [--open]
+  stream-eval monitor serve [--port 8765] [--open]
 
   # pin to a specific Claude Code session by UUID, UUID prefix, or name
-  python3 tools/eval-monitor.py serve --session test-rename-yeehaw
-  python3 tools/eval-monitor.py serve --session 0fc37026
+  stream-eval monitor serve --session test-rename-yeehaw
+  stream-eval monitor serve --session 0fc37026
 
   # serve and open the dashboard in the default browser
-  python3 tools/eval-monitor.py serve --open
+  stream-eval monitor serve --open
 
 The serve mode loads its HTML shell once and polls /api/state.json
 client-side -- 5s when there are active runs, 30s when idle, pauses
@@ -88,13 +91,25 @@ def proc_cwd(pid):
     return None
 
 
-EVAL_HARNESS_RE = re.compile(r"tools/(?P<kind_file>trigger|synthesis)-eval\.py")
+# Match the harness invocation in `ps` output. Three legitimate forms:
+#   1. Console script: `... stream-eval trigger ...` or `... stream-eval synthesis ...`
+#   2. Module form:    `... python -m stream_eval.cli trigger ...` (or synthesis)
+#   3. Legacy in-repo: `... tools/trigger-eval.py ...` (kept until Phase G cutover
+#      removes claude-code-skills/tools/ entirely; harmless to match both)
+EVAL_HARNESS_RE = re.compile(
+    r"(?:"
+    r"stream-eval\s+(?P<kind_cli>trigger|synthesis)"
+    r"|stream_eval\.cli\s+(?P<kind_mod>trigger|synthesis)"
+    r"|tools/(?P<kind_file>trigger|synthesis)-eval\.py"
+    r")"
+)
 
 
 def find_eval_pythons():
     """Return [(pid, kind, skill_name, eval_path_abs, timeout_s)] for
-    Python interpreters running either trigger-eval.py or
-    synthesis-eval.py.
+    Python interpreters running either stream_eval.trigger or
+    stream_eval.synthesis (also matches the legacy `tools/*-eval.py`
+    forms until Phase G removes them).
 
     kind is "trigger" or "synthesis" (matches what the harnesses emit
     on their canonical stderr line). skill_name comes from --skill-name
@@ -118,7 +133,11 @@ def find_eval_pythons():
             continue
         pid = int(parts[0])
         cmd = parts[1]
-        kind = m_harness.group("kind_file")
+        kind = (
+            m_harness.group("kind_cli")
+            or m_harness.group("kind_mod")
+            or m_harness.group("kind_file")
+        )
         m_eval = re.search(r"--eval\s+(\S+)", cmd)
         eval_path = m_eval.group(1) if m_eval else None
 

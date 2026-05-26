@@ -8,14 +8,17 @@ import sys
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        _print_help()
+        # Bare invocation is a usage error: stderr + exit 2.
+        _print_help(file=sys.stderr)
         return 2
 
     cmd = argv[0]
     rest = argv[1:]
 
     if cmd in ("-h", "--help"):
-        _print_help()
+        # User asked for help: stdout + exit 0 (Unix convention; argparse
+        # behaves the same way for subcommand --help).
+        _print_help(file=sys.stdout)
         return 0
 
     if cmd == "trigger":
@@ -28,12 +31,13 @@ def main(argv=None):
         from stream_eval.monitor import main as monitor_main
         return monitor_main(rest)
 
+    # Unknown subcommand is a usage error: stderr + exit 2.
     print(f"stream-eval: unknown subcommand: {cmd!r}", file=sys.stderr)
-    _print_help()
+    _print_help(file=sys.stderr)
     return 2
 
 
-def _print_help():
+def _print_help(*, file):
     print(
         "usage: stream-eval <subcommand> [options]\n"
         "\n"
@@ -43,7 +47,7 @@ def _print_help():
         "  monitor    serve the live dashboard\n"
         "\n"
         "Run `stream-eval <subcommand> --help` for subcommand-specific options.",
-        file=sys.stderr,
+        file=file,
     )
 
 

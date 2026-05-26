@@ -1,4 +1,4 @@
-"""Shared eval-runner library for trigger-eval.py and synthesis-eval.py.
+"""Shared eval-runner library for stream_eval.trigger and stream_eval.synthesis.
 
 Owns: ProcessPoolExecutor dispatch, abort-on-first-timeout, the canonical
 stderr progress line, the startup banner, the results-JSON envelope,
@@ -10,7 +10,7 @@ defaults, transcript JSONL persistence (synthesis-only behavior toggled
 by the harness passing transcript_dir=Path).
 
 Each harness imports run_eval and supplies kind-specific callbacks
-(see tools/trigger-eval.py and tools/synthesis-eval.py for examples).
+(see stream_eval/trigger.py and stream_eval/synthesis.py for examples).
 """
 import json
 import os
@@ -165,7 +165,7 @@ def format_startup_banner(*, kind, skill, eval_path, runs, workers,
                           total_fixtures):
     """The runner emits this to stderr before the first task completes.
 
-    eval-monitor.py parses it from each .output file to bind finished
+    stream_eval.monitor parses it from each .output file to bind finished
     runs to (skill, kind) without inferring from now-removed
     'first_skill=' fields. total_fixtures lets the dashboard render an
     authoritative qpass denominator from the start of the run, before

@@ -795,6 +795,40 @@ class TestFindEvalPythons(unittest.TestCase):
         _pid, _kind, _skill, _eval, timeout_s = results[0]
         self.assertEqual(timeout_s, 600)
 
+    def test_recognizes_console_script_form(self):
+        """The new console-script invocation `stream-eval trigger ...`
+        must be detected. This is how `pip install -e .` users invoke
+        the harness post-extraction. On macOS/Linux, ps shows the
+        python interpreter resolving the console-script wrapper, so
+        the line still contains 'python'."""
+        ps_output = (
+            "  44444 /repo/stream-eval/.venv/bin/python3.12 "
+            "/repo/stream-eval/.venv/bin/stream-eval trigger "
+            "--eval evals/dsc-scrape/trigger-eval.json "
+            "--skill-name dsc-scrape --runs 3\n"
+        )
+        with mock.patch.object(monitor, "run", return_value=ps_output):
+            results = monitor.find_eval_pythons()
+        self.assertEqual(len(results), 1)
+        pid, kind, skill, _eval, _timeout = results[0]
+        self.assertEqual(pid, 44444)
+        self.assertEqual(kind, "trigger")
+        self.assertEqual(skill, "dsc-scrape")
+
+    def test_recognizes_module_form(self):
+        """The module invocation `python -m stream_eval.cli synthesis ...`
+        must also be detected."""
+        ps_output = (
+            "  55555 /usr/bin/python3 -m stream_eval.cli synthesis "
+            "--eval evals/dsc-scrape/synthesis-eval.json --runs 5\n"
+        )
+        with mock.patch.object(monitor, "run", return_value=ps_output):
+            results = monitor.find_eval_pythons()
+        self.assertEqual(len(results), 1)
+        _pid, kind, skill, _eval, _timeout = results[0]
+        self.assertEqual(kind, "synthesis")
+        self.assertEqual(skill, "dsc-scrape")
+
 
 class TestParseTranscriptFilename(unittest.TestCase):
     """parse_transcript_filename splits `<basename>.jsonl` into

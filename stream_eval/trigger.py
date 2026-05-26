@@ -4,7 +4,7 @@
 Fires claude -p runs and scores the first tool invocation. Was
 probe-eval.py historically (commit 1d1c08b); the rename matches the
 fixture format (`evals/<skill>/trigger-eval.json`) and disambiguates
-from synthesis-eval.py.
+from stream_eval.synthesis.
 
 For each query in the eval set, spawn N runs of `claude -p --model sonnet
 <query>` in parallel. Parse the stream-json output; a run counts as
@@ -16,9 +16,8 @@ A query passes when its trigger rate meets its `should_trigger` expectation
 with a 0.5 threshold.
 
 Prerequisite: the skill must already be installed under ~/.claude/skills/
-with its real (clean) name. See ../CLAUDE.md for why -- skill-creator's
-run_eval.py registers skills differently and produces misleading numbers
-on this harness.
+with its real (clean) name. (Phase C of the extraction plan replaces this
+with hermetic per-spawn isolation -- see docs/.)
 
 Bail signal is api_retry-aware. The CLI emits stream-json events of the
 shape `{"type":"system","subtype":"api_retry","attempt":N,"max_retries":M,
@@ -31,7 +30,7 @@ event), which is the documented "gateway window is poisoned" condition.
 A generous absolute wall clock (--timeout) acts as a safety backstop for
 truly hung processes.
 
-Exit codes mirror synthesis-eval.py:
+Exit codes mirror stream_eval.synthesis:
   0 -- all queries pass
   1 -- at least one query fails
   3 -- aborted on retry-budget exhaustion or absolute wall clock (no
@@ -40,7 +39,7 @@ Exit codes mirror synthesis-eval.py:
        gateway has recovered)
 
 Usage:
-  python3 tools/trigger-eval.py \\
+  stream-eval trigger \\
     --eval evals/dsc-endpoint-help/trigger-eval.json \\
     --skill-name dsc-endpoint-help \\
     --runs 3 --workers 4 --timeout 1800 \\
@@ -58,19 +57,19 @@ from stream_eval.runner import run_eval
 def get_trigger_query(fixture):
     """Module-level query extractor (rather than an inline lambda) so
     it survives ProcessPoolExecutor pickling on macOS spawn-mode workers.
-    Mirrors get_synthesis_query in tools/synthesis-eval.py."""
+    Mirrors get_synthesis_query in stream_eval.synthesis."""
     return fixture["query"]
 
 
 def transcript_dir_for(out_path):
     """Per-run transcript directory, namespaced by `--out` stem so
     multi-phase iterations sharing one results dir don't clobber each
-    other's JSONLs. Mirrors transcript_dir_for in tools/synthesis-eval.py."""
+    other's JSONLs. Mirrors transcript_dir_for in stream_eval.synthesis."""
     return out_path.parent / "transcripts" / out_path.stem
 
 
 def score_trigger_run(fixture, transcript_path, bail, *, target_skill):
-    """Trigger-eval scoring callback for _eval_runner.run_eval.
+    """Trigger-eval scoring callback for stream_eval.runner.run_eval.
 
     Receives the fixture, the path to the (already-written) transcript,
     and the bail dict. The runner doesn't call this on timed-out runs.

@@ -190,7 +190,7 @@ def get_synthesis_query(fixture):
 
 
 def score_synthesis_run(fixture, transcript_path, bail):
-    """Synthesis scoring callback for _eval_runner.run_eval.
+    """Synthesis scoring callback for stream_eval.runner.run_eval.
 
     Receives the fixture, the path to the (already-written) transcript,
     and the bail dict. Returns (pass: bool, kind_extra: dict).
