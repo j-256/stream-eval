@@ -1,41 +1,50 @@
-"""Top-level CLI entry point. Subcommands:
-- trigger: run the trigger-accuracy harness
-- synthesis: run the synthesis-behavior harness
-- monitor: serve the live dashboard
-
-Phase B replaces the stub handlers with real implementations.
+"""Top-level CLI entry point for stream-eval. Subcommands dispatch to
+the per-kind harness modules. Each module owns its own argparse and
+returns an exit code from its `main()`.
 """
-import argparse
 import sys
 
 
-def _stub(name):
-    def handler(_args):
-        print(f"stream-eval {name}: not yet implemented", file=sys.stderr)
-        return 0
-    return handler
-
-
-def build_parser():
-    parser = argparse.ArgumentParser(prog="stream-eval")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    p_trigger = sub.add_parser("trigger", help="trigger-accuracy harness")
-    p_trigger.set_defaults(func=_stub("trigger"))
-
-    p_synth = sub.add_parser("synthesis", help="synthesis-behavior harness")
-    p_synth.set_defaults(func=_stub("synthesis"))
-
-    p_monitor = sub.add_parser("monitor", help="live dashboard")
-    p_monitor.set_defaults(func=_stub("monitor"))
-
-    return parser
-
-
 def main(argv=None):
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    return args.func(args)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        _print_help()
+        return 2
+
+    cmd = argv[0]
+    rest = argv[1:]
+
+    if cmd in ("-h", "--help"):
+        _print_help()
+        return 0
+
+    if cmd == "trigger":
+        from stream_eval.trigger import main as trigger_main
+        return trigger_main(rest)
+    if cmd == "synthesis":
+        from stream_eval.synthesis import main as synthesis_main
+        return synthesis_main(rest)
+    if cmd == "monitor":
+        from stream_eval.monitor import main as monitor_main
+        return monitor_main(rest)
+
+    print(f"stream-eval: unknown subcommand: {cmd!r}", file=sys.stderr)
+    _print_help()
+    return 2
+
+
+def _print_help():
+    print(
+        "usage: stream-eval <subcommand> [options]\n"
+        "\n"
+        "Subcommands:\n"
+        "  trigger    run the trigger-accuracy harness\n"
+        "  synthesis  run the synthesis-behavior harness\n"
+        "  monitor    serve the live dashboard\n"
+        "\n"
+        "Run `stream-eval <subcommand> --help` for subcommand-specific options.",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":
