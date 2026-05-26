@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stream-eval"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Deterministic assertion harness for claude -p stream-json transcripts."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -17,11 +17,10 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Operating System :: POSIX :: Linux",
-    "Operating System :: MacOS",
+    "Operating System :: MacOS :: MacOS X",
 ]
 dependencies = [
     "Flask>=3.0",
-    "Jinja2>=3.1",
     "psutil>=5.9",
 ]
 
@@ -33,6 +32,9 @@ dev = [
 
 [project.scripts]
 stream-eval = "stream_eval.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "stream_eval.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["."]

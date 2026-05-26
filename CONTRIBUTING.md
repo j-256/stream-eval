@@ -13,7 +13,7 @@ pip install -e .[dev]
 
 ```bash
 pytest                       # full suite
-pytest tests/test_runner.py  # one file
+pytest tests/test_<module>.py  # one file
 pytest -k "isolation"        # by name pattern
 pytest -v                    # verbose
 ```
