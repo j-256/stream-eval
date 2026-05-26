@@ -164,15 +164,19 @@ Pass criterion (per fixture): `expected_skill` matched (if set) AND every assert
 ```bash
 stream-eval trigger \
     --eval evals/dsc-endpoint-help/trigger-eval.json \
-    --skill-name dsc-endpoint-help \
+    --skill-path skills/dsc-endpoint-help \
     --runs 3 --workers 4 --timeout 1800 \
     --out evals/dsc-endpoint-help/runs/iteration-N/results.json
 ```
 
+**Path-based input.** The harness reads the skill name from `<skill-path>/SKILL.md`'s frontmatter `name:` field. This decouples the skill's directory layout from its canonical name and avoids silent breakage when a directory is renamed.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--eval` | required | Path to a `trigger-eval.json` fixture file. |
-| `--skill-name` | required | Clean skill name (matches the install symlink under `~/.claude/skills/`). |
+| `--skill-path` | required for `isolated` profile | Path to the skill directory (containing `SKILL.md`). The skill name is read from `SKILL.md` frontmatter. |
+| `--skill-name` | from `SKILL.md` | Override the skill name. Required when `--skill-path` is omitted (for `restricted` or `inherit` profiles). |
+| `--also-install` | none | Path to a sibling skill to install alongside the skill under test. May be repeated. Only effective under the `isolated` profile. |
 | `--runs` | 3 | Runs per fixture. |
 | `--workers` | 4 | Concurrent `claude -p` subprocesses. |
 | `--timeout` | 1800 | Wall-clock backstop in seconds. Primary bail signal is api_retry exhaustion; this fires only for hung processes. |
@@ -192,15 +196,17 @@ Exit codes:
 ```bash
 stream-eval synthesis \
     --eval evals/dsc-scrape/synthesis-eval.json \
+    --skill-path skills/dsc-scrape \
     --runs 5 --workers 4 --timeout 240 \
     --out evals/dsc-scrape/runs/iteration-N/results.json
 ```
 
-Same shape, with these differences from trigger:
+Same shape as trigger. These flags differ:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--skill-name` | not used | Synthesis takes per-fixture `expected_skill`. |
+| `--skill-path` | optional | Path to the skill directory. Required for the `isolated` profile (default). If omitted, skill name falls back to the `--eval` JSON's parent directory name. |
+| `--skill-name` | from `SKILL.md` or eval path | Override the skill name. |
 | `--runs` | 5 | Higher than trigger because assertion failures can be noisy. |
 | `--timeout` | 240 | Lower than trigger because synthesis runs are typically shorter. |
 | `--lenient` | off | Pass if majority of runs pass. Default is strict (every run must pass every assertion). |
@@ -208,6 +214,18 @@ Same shape, with these differences from trigger:
 Synthesis additionally retains per-run stream-json transcripts at `runs/<iteration>/transcripts/<out-stem>/<fixture>-<N>.jsonl` for offline debugging. Trigger runs use a tempfile that's unlinked after scoring.
 
 Exit code 2 is unique to synthesis: fixture schema error (returned before any runs spawn). Otherwise the codes match trigger.
+
+### Profiles
+
+Three semantic profiles control how the spawn sees the user's environment:
+
+| Profile | Skills visible | MCP / Agent | When to use |
+|---|---|---|---|
+| `isolated` (default) | only `--skill-path` (+ `--also-install` if any) | none | Production-equivalent for a vanilla install. The skill is tested as a user with nothing else would experience it. |
+| `restricted` | user's globally-installed skills | none (stripped) | Tests a skill against the user's other globally-installed skills but without MCP/Agent. |
+| `inherit` | user's globally-installed skills | user's MCP + Agent | Closest to interactive use. Useful for diagnostic runs where you want to see what the agent reaches for given everything. |
+
+Set via the `STREAM_EVAL_PROFILE` env var or `--profile <name>`.
 
 ## The dashboard
 
@@ -263,7 +281,7 @@ The harnesses read configuration from `.env` at the repo root (gitignored) via `
 | Variable | Default | Description |
 |---|---|---|
 | `STREAM_EVAL_MODEL` | `sonnet` | Model identifier passed to `claude -p --model`. Pin the exact gateway-accepted identifier (e.g. `claude-sonnet-4-6`) rather than relying on the `sonnet` alias, which resolves to the older Sonnet on this gateway. (Renamed from `DSC_EVAL_MODEL`.) |
-| `STREAM_EVAL_PROFILE` | `default` | Toolbelt profile (`default` or `restricted`) for spawned `claude -p` subprocesses. (Renamed from `DSC_EVAL_PROFILE`.) |
+| `STREAM_EVAL_PROFILE` | `isolated` | Toolbelt profile (`isolated`, `restricted`, or `inherit`) for spawned `claude -p` subprocesses. (Renamed from `DSC_EVAL_PROFILE`; previous `default` profile renamed to `inherit`.) |
 | `DASHBOARD_MAX_AGE_HOURS` | `4` | Recent-fallback window for session detection in `stream_eval/monitor.py`. Stale `.output` files older than this don't surface as "this session". |
 
 Existing environment values win over `.env`; `.env` only fills gaps. No-op if `.env` is missing.

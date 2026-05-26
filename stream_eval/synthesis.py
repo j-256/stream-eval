@@ -253,13 +253,35 @@ def main(argv=None):
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--cwd", default=None)
     ap.add_argument(
-        "--profile", choices=["default", "restricted"], default="default",
-        help="Toolbelt profile for the spawned claude -p. 'default' "
-             "inherits the user's MCP/Agent setup; 'restricted' mirrors "
-             "a vanilla install (no MCP, no Agent) -- production-equivalent "
-             "for skills that ship to users without those alternates.",
+        "--profile", choices=["isolated", "restricted", "inherit"],
+        default="isolated",
+        help="Toolbelt profile for the spawned claude -p. 'isolated' "
+             "(default) uses a temp HOME with only the skill under test; "
+             "'restricted' uses the user's real HOME but strips MCP/Agent; "
+             "'inherit' runs with the user's full environment.",
     )
+    ap.add_argument("--skill-path", required=False,
+                    help="Path to the skill directory (containing SKILL.md). "
+                         "Required for the default 'isolated' profile.")
+    ap.add_argument("--also-install", action="append", default=[],
+                    metavar="PATH",
+                    help="Path to a sibling skill to install alongside the "
+                         "skill under test. May be repeated.")
+    ap.add_argument("--skill-name", required=False, default=None,
+                    help="Override the skill name. Default: read from "
+                         "SKILL.md frontmatter when --skill-path is given, "
+                         "else from the --eval JSON's parent directory name.")
     args = ap.parse_args(argv)
+
+    from stream_eval.isolation import parse_skill_md_name
+
+    if args.skill_path:
+        skill_path = os.path.abspath(args.skill_path)
+        skill_name = args.skill_name or parse_skill_md_name(skill_path)
+    else:
+        skill_path = None
+        skill_name = args.skill_name or Path(args.eval).resolve().parent.name
+    also_install = [os.path.abspath(p) for p in args.also_install]
 
     os.environ["STREAM_EVAL_PROFILE"] = args.profile
 
@@ -276,8 +298,6 @@ def main(argv=None):
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_dir = transcript_dir_for(out_path)
-
-    skill_name = Path(args.eval).resolve().parent.name
 
     def summarize(fixtures_with_runs):
         summary = []
@@ -323,6 +343,8 @@ def main(argv=None):
         summary_label="fixtures",
         skill_name=skill_name,
         eval_path=args.eval,
+        skill_path=skill_path,
+        also_install=also_install,
     )
 
     results["strict"] = not args.lenient

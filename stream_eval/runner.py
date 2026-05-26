@@ -12,6 +12,7 @@ by the harness passing transcript_dir=Path).
 Each harness imports run_eval and supplies kind-specific callbacks
 (see stream_eval/trigger.py and stream_eval/synthesis.py for examples).
 """
+import contextlib
 import json
 import os
 import re
@@ -23,26 +24,34 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from stream_eval.env import load_dotenv
+from stream_eval.isolation import prepare_isolated_home
 from stream_eval.subprocess import run_with_retry_aware_bail
 
 load_dotenv()
 EVAL_MODEL = os.environ.get("STREAM_EVAL_MODEL", "sonnet")
 
-# Toolbelt profiles for `claude -p`. The default profile inherits whatever
-# MCP servers and built-in tools the user's session has wired up, which on
-# this machine includes Agent (researcher subagent), several MCP search
-# servers (mcp-adaptor, plugin_search, plugin_google), and other alternates
-# that bypass a skill's bundled scripts. The restricted profile mirrors a
-# vanilla install: no MCP servers, no Agent, only the built-in tools a
-# skill author can rely on. See iteration-eval-environment-artifact for
-# the diagnosis driving this knob.
+# MCP and Agent strip flags. Used by both `isolated` and `restricted`
+# profiles below; pulled out to a constant so the two stay in sync if the
+# strip set ever changes.
+_STRIP_MCP_AGENT_FLAGS = [
+    "--strict-mcp-config",
+    "--mcp-config", '{"mcpServers":{}}',
+    "--disallowedTools", "Agent",
+]
+
+# Three profiles, semantically distinct:
+# - isolated (default): temp HOME containing ONLY the skill under test;
+#   --strict-mcp-config and --disallowedTools Agent strip MCP/Agent.
+#   Production-equivalent for a vanilla install.
+# - restricted: user's real HOME; same MCP/Agent strip flags. Tests a
+#   skill against the user's other globally-installed skills but without
+#   MCP/Agent.
+# - inherit: user's real HOME; no flags stripped. Closest to interactive
+#   use; useful for diagnostic runs.
 PROFILE_FLAGS = {
-    "default": [],
-    "restricted": [
-        "--strict-mcp-config",
-        "--mcp-config", '{"mcpServers":{}}',
-        "--disallowedTools", "Agent",
-    ],
+    "isolated": _STRIP_MCP_AGENT_FLAGS,
+    "restricted": _STRIP_MCP_AGENT_FLAGS,
+    "inherit": [],
 }
 
 
@@ -441,7 +450,8 @@ def _destroy_worker_worktree(wt_path):
     return failures
 
 
-def _spawn_and_bail(query, transcript_path, timeout, cwd):
+def _spawn_and_bail(query, transcript_path, timeout, cwd,
+                    skill_path=None, also_install=()):
     """Run claude -p with the canonical command line in an ephemeral
     per-spawn git worktree. Returns the bail dict from
     run_with_retry_aware_bail with three extra keys:
@@ -472,12 +482,24 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd):
     including the harness source files being edited mid-development.
     """
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    profile = os.environ.get("STREAM_EVAL_PROFILE", "default")
+    profile = os.environ.get("STREAM_EVAL_PROFILE", "isolated")
     if profile not in PROFILE_FLAGS:
         raise ValueError(
             f"unknown STREAM_EVAL_PROFILE {profile!r}; "
             f"must be one of {sorted(PROFILE_FLAGS)}"
         )
+    if profile == "isolated":
+        if skill_path is None:
+            raise ValueError(
+                "profile=isolated requires skill_path; pass --skill-path "
+                "to the harness CLI"
+            )
+        home_ctx = prepare_isolated_home(
+            skill_path=skill_path, also_install=also_install,
+        )
+    else:
+        home_ctx = contextlib.nullcontext((None, None))
+
     cmd = [
         "claude",
         "-p", query,
@@ -503,9 +525,12 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd):
     spawn_id = f"{int(time.time() * 1e9)}"
     wt_path = _create_worker_worktree(repo_root, spawn_id)
     try:
-        bail = run_with_retry_aware_bail(
-            cmd, transcript_path, env, wt_path, timeout,
-        )
+        with home_ctx as (isolated_home, _isolated_name):
+            if isolated_home is not None:
+                env["HOME"] = isolated_home
+            bail = run_with_retry_aware_bail(
+                cmd, transcript_path, env, wt_path, timeout,
+            )
         # Detection: did the spawn leave the worktree dirty? The
         # operator repo is untouchable by construction; this flag
         # is purely for marking pass verdicts as unaudited.
@@ -531,7 +556,8 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd):
 
 
 def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
-                  timeout, cwd, get_query, score_run):
+                  timeout, cwd, get_query, score_run,
+                  skill_path=None, also_install=()):
     """Worker entry point: spawn one claude -p, score, return per-run dict.
 
     transcript_dir=None -> tempfile that gets unlinked. Otherwise the
@@ -577,7 +603,8 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
 
     t0 = time.time()
     try:
-        bail = _spawn_and_bail(query, transcript_path, timeout, cwd)
+        bail = _spawn_and_bail(query, transcript_path, timeout, cwd,
+                              skill_path=skill_path, also_install=also_install)
         elapsed = round(time.time() - t0, 2)
         timed_out = bail["retry_budget_exhausted"] or bail["wall_timed_out"]
         if bail["retry_budget_exhausted"]:
@@ -619,16 +646,18 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
 def _pool_target(args_tuple):
     """Top-level pickle target for ProcessPoolExecutor."""
     (fixture, run_idx, fixture_id, transcript_dir, timeout, cwd,
-     get_query, score_run) = args_tuple
+     get_query, score_run, skill_path, also_install) = args_tuple
     return _run_one_task(fixture, run_idx, fixture_id,
                           transcript_dir, timeout, cwd,
-                          get_query, score_run)
+                          get_query, score_run,
+                          skill_path=skill_path, also_install=also_install)
 
 
 def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
              summarize, runs_per_fixture, workers, timeout, cwd,
              transcript_dir, summary_label,
              skill_name, eval_path,
+             skill_path=None, also_install=(),
              executor_class=ProcessPoolExecutor):
     """Drive the eval. Returns (results_dict, exit_code).
 
@@ -729,6 +758,7 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
                 fixture, run_idx, fixture_id,
                 str(transcript_dir) if transcript_dir else None,
                 timeout, cwd, get_query, score_run,
+                skill_path, also_install,
             ))
 
     results_by_id = {fid: {"fixture": fx, "runs": []}
@@ -742,7 +772,7 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
         futures = {ex.submit(_pool_target, t): t for t in tasks}
         for fut in as_completed(futures):
             (fx, run_idx, fixture_id, _td, _to, _cwd,
-             _gq, _sr) = futures[fut]
+             _gq, _sr, _sp, _ai) = futures[fut]
             try:
                 r = fut.result()
             except Exception as e:

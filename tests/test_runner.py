@@ -316,7 +316,8 @@ class TestRunEvalAbortOnTimeout(unittest.TestCase):
         gate = threading.Event()
 
         def fake_runner(fixture, run_idx, fixture_id, transcript_dir,
-                        timeout, cwd, get_query, score_run):
+                        timeout, cwd, get_query, score_run,
+                        skill_path=None, also_install=()):
             """Simulates one worker: returns a per-run record dict
             that the runner reads. The first call reports timed_out;
             subsequent calls (if reached, before cancellation) block
@@ -410,7 +411,8 @@ class TestRunEvalAbortOnTimeout(unittest.TestCase):
         scored_calls = []
 
         def fake_runner(fixture, run_idx, fixture_id, transcript_dir,
-                        timeout, cwd, get_query, score_run):
+                        timeout, cwd, get_query, score_run,
+                        skill_path=None, also_install=()):
             scored_calls.append((fixture_id, run_idx))
             return {
                 "fixture_id": fixture_id, "run_idx": run_idx,
@@ -457,7 +459,8 @@ class TestRunEvalAbortOnTimeout(unittest.TestCase):
         fixtures = [{"q": "a"}]
 
         def fake_runner(fixture, run_idx, fixture_id, transcript_dir,
-                        timeout, cwd, get_query, score_run):
+                        timeout, cwd, get_query, score_run,
+                        skill_path=None, also_install=()):
             return {
                 "fixture_id": fixture_id, "run_idx": run_idx,
                 "elapsed_seconds": 0.5, "total_retries": 0,
@@ -683,14 +686,15 @@ class TestSpawnAndBailWorktreeProtection(unittest.TestCase):
                 "exit_code": 0,
             }
 
-        with mock.patch(
-            "stream_eval.runner.run_with_retry_aware_bail",
-            side_effect=fake_spawn,
-        ):
-            with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
-                bail = _spawn_and_bail(
-                    "fake query", tf.name, timeout=30, cwd=self.tmpdir,
-                )
+        with mock.patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "inherit"}):
+            with mock.patch(
+                "stream_eval.runner.run_with_retry_aware_bail",
+                side_effect=fake_spawn,
+            ):
+                with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
+                    bail = _spawn_and_bail(
+                        "fake query", tf.name, timeout=30, cwd=self.tmpdir,
+                    )
 
         self.assertFalse(bail["worktree_contaminated"])
         self.assertEqual(bail["worktree_changed_paths"], [])
@@ -718,14 +722,15 @@ class TestSpawnAndBailWorktreeProtection(unittest.TestCase):
                 "exit_code": 0,
             }
 
-        with mock.patch(
-            "stream_eval.runner.run_with_retry_aware_bail",
-            side_effect=fake_spawn,
-        ):
-            with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
-                bail = _spawn_and_bail(
-                    "fake query", tf.name, timeout=30, cwd=self.tmpdir,
-                )
+        with mock.patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "inherit"}):
+            with mock.patch(
+                "stream_eval.runner.run_with_retry_aware_bail",
+                side_effect=fake_spawn,
+            ):
+                with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
+                    bail = _spawn_and_bail(
+                        "fake query", tf.name, timeout=30, cwd=self.tmpdir,
+                    )
 
         self.assertFalse(bail["worktree_contaminated"])
         self.assertTrue(
@@ -960,13 +965,14 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
                 "exit_code": 0,
             }
 
-        with mock.patch(
-            "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
-        ):
-            with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
-                _spawn_and_bail(
-                    "fake query", tf.name, timeout=30, cwd=self.tmpdir,
-                )
+        with mock.patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "inherit"}):
+            with mock.patch(
+                "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
+            ):
+                with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
+                    _spawn_and_bail(
+                        "fake query", tf.name, timeout=30, cwd=self.tmpdir,
+                    )
 
         self.assertEqual(len(captured_cwds), 1)
         self.assertNotEqual(
@@ -1010,13 +1016,14 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
             cwd=self.tmpdir, capture_output=True, text=True, check=True,
         ).stdout.splitlines()
 
-        with mock.patch(
-            "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
-        ):
-            with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
-                _spawn_and_bail(
-                    "fake query", tf.name, timeout=30, cwd=self.tmpdir,
-                )
+        with mock.patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "inherit"}):
+            with mock.patch(
+                "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
+            ):
+                with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
+                    _spawn_and_bail(
+                        "fake query", tf.name, timeout=30, cwd=self.tmpdir,
+                    )
 
         # Operator's tracked file untouched.
         self.assertEqual(self.victim.read_text(), "export {};\n")
@@ -1061,13 +1068,14 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
                 "exit_code": 0,
             }
 
-        with mock.patch(
-            "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
-        ):
-            with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
-                bail = _spawn_and_bail(
-                    "fake query", tf.name, timeout=30, cwd=self.tmpdir,
-                )
+        with mock.patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "inherit"}):
+            with mock.patch(
+                "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
+            ):
+                with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
+                    bail = _spawn_and_bail(
+                        "fake query", tf.name, timeout=30, cwd=self.tmpdir,
+                    )
 
         self.assertFalse(bail["worktree_contaminated"])
         self.assertEqual(bail["worktree_changed_paths"], [])
@@ -1094,13 +1102,14 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
                 "exit_code": 0,
             }
 
-        with mock.patch(
-            "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
-        ):
-            with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
-                bail = _spawn_and_bail(
-                    "fake query", tf.name, timeout=30, cwd=self.tmpdir,
-                )
+        with mock.patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "inherit"}):
+            with mock.patch(
+                "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
+            ):
+                with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
+                    bail = _spawn_and_bail(
+                        "fake query", tf.name, timeout=30, cwd=self.tmpdir,
+                    )
 
         self.assertTrue(bail["worktree_contaminated"])
         self.assertIn("skills/module.js", bail["worktree_changed_paths"])
@@ -1135,13 +1144,14 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
                 "exit_code": 0,
             }
 
-        with mock.patch(
-            "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
-        ):
-            with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
-                _spawn_and_bail(
-                    "fake query", tf.name, timeout=30, cwd=self.tmpdir,
-                )
+        with mock.patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "inherit"}):
+            with mock.patch(
+                "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
+            ):
+                with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
+                    _spawn_and_bail(
+                        "fake query", tf.name, timeout=30, cwd=self.tmpdir,
+                    )
 
         self.assertEqual(
             seen_content, ["export {};\n"],

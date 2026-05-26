@@ -48,6 +48,11 @@ def run_with_retry_aware_bail(cmd, stdout_path, env, cwd, timeout):
     The caller opens stdout_path themselves before calling, and is
     responsible for parsing the file's contents after the call returns.
 
+    The caller controls the spawn's full environment via `env`. Specifically:
+    to give the spawn an isolated HOME, override env["HOME"] before calling.
+    The harness-side helper that builds such an env is
+    stream_eval.isolation.prepare_isolated_home.
+
     Returns a dict:
       {
         "retry_budget_exhausted": bool,

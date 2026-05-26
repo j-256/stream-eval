@@ -111,8 +111,20 @@ def score_trigger_run(fixture, transcript_path, bail, *, target_skill):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--eval", required=True, help="Path to trigger-eval.json")
-    ap.add_argument("--skill-name", required=True,
-                    help="Clean skill name, e.g. dsc-endpoint-help")
+    ap.add_argument("--skill-path", required=False,
+                    help="Path to the skill directory (containing SKILL.md). "
+                         "Required for the default 'isolated' profile; the "
+                         "skill name is read from SKILL.md frontmatter. "
+                         "Optional for 'restricted' or 'inherit' profiles, "
+                         "which test the user's globally-installed skill.")
+    ap.add_argument("--also-install", action="append", default=[],
+                    metavar="PATH",
+                    help="Path to a sibling skill to install alongside the "
+                         "skill under test. May be repeated. Only effective "
+                         "under the 'isolated' profile.")
+    ap.add_argument("--skill-name", required=False, default=None,
+                    help="Override the skill name. Default: read from "
+                         "SKILL.md frontmatter when --skill-path is given.")
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=1800,
@@ -122,14 +134,30 @@ def main(argv=None):
     ap.add_argument("--cwd", default=None,
                     help="CWD for claude -p subprocesses (default: current dir)")
     ap.add_argument(
-        "--profile", choices=["default", "restricted"], default="default",
-        help="Toolbelt profile for the spawned claude -p. 'default' "
-             "inherits the user's MCP/Agent setup; 'restricted' mirrors "
-             "a vanilla install (no MCP, no Agent) -- production-equivalent "
-             "for skills that ship to users without those alternates.",
+        "--profile", choices=["isolated", "restricted", "inherit"],
+        default="isolated",
+        help="Toolbelt profile for the spawned claude -p. 'isolated' "
+             "(default) uses a temp HOME with only the skill under test; "
+             "'restricted' uses the user's real HOME but strips MCP/Agent; "
+             "'inherit' runs with the user's full environment.",
     )
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
+
+    from stream_eval.isolation import parse_skill_md_name
+
+    if args.skill_path:
+        skill_path = os.path.abspath(args.skill_path)
+        skill_name = args.skill_name or parse_skill_md_name(skill_path)
+    else:
+        if not args.skill_name:
+            ap.error(
+                "--skill-name is required when --skill-path is omitted "
+                "(profile=restricted or profile=inherit)"
+            )
+        skill_path = None
+        skill_name = args.skill_name
+    also_install = [os.path.abspath(p) for p in args.also_install]
 
     os.environ["STREAM_EVAL_PROFILE"] = args.profile
 
@@ -141,7 +169,7 @@ def main(argv=None):
     transcript_dir = transcript_dir_for(out_path)
 
     score_callback = functools.partial(
-        score_trigger_run, target_skill=args.skill_name,
+        score_trigger_run, target_skill=skill_name,
     )
 
     def summarize(fixtures_with_runs):
@@ -181,11 +209,13 @@ def main(argv=None):
         cwd=cwd,
         transcript_dir=transcript_dir,
         summary_label="queries",
-        skill_name=args.skill_name,
+        skill_name=skill_name,
         eval_path=args.eval,
+        skill_path=skill_path,
+        also_install=also_install,
     )
 
-    results["skill_name"] = args.skill_name
+    results["skill_name"] = skill_name
     results["passed"] = sum(
         1 for r in results["results"] if r["pass"]
     )
