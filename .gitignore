@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.venv/
+venv/
+.env
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Stream-eval per-run state
+/tmp/

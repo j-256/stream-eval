@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stream-eval"
+version = "0.1.0"
+description = "Deterministic assertion harness for claude -p stream-json transcripts."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "j-256" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+dependencies = [
+    "Flask>=3.0",
+    "Jinja2>=3.1",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+stream-eval = "stream_eval.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stream_eval*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
