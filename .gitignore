@@ -27,3 +27,7 @@ venv/
 
 # Stream-eval per-run state
 /tmp/
+
+# Eval outputs from local smoke runs -- this repo is the harness, not
+# a corpus. Skills repos check in their own evals/ trees.
+/evals/

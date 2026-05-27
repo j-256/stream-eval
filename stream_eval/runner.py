@@ -319,6 +319,69 @@ def format_startup_banner(*, kind, skill, eval_path, runs, workers,
     )
 
 
+def _install_stderr_tee():
+    """Replace sys.stderr with a tee that forwards to the original
+    stderr AND to ~/.claude/projects/stream-eval/<harness-pid>.output.
+
+    The dashboard's find_output_files walks ~/.claude/projects/ for
+    *.output files. Without this tee, real evals are invisible to the
+    dashboard because Claude Code's Bash tool puts background-process
+    stderr under /tmp/claude-501/, which the dashboard doesn't scan.
+
+    Idempotent: a second call is a no-op (we set a flag on the wrapped
+    stream). Failures are silently swallowed because dashboard
+    visibility is a UX feature, not a correctness one -- if HOME is
+    weird or the projects dir isn't writable, the eval should still
+    run.
+    """
+    if getattr(sys.stderr, "_stream_eval_teed", False):
+        return
+    try:
+        log_dir = Path.home() / ".claude" / "projects" / "stream-eval"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{os.getpid()}.output"
+        log_file = open(log_path, "w", buffering=1)  # line-buffered
+    except OSError:
+        return
+    original = sys.stderr
+    sys.stderr = _StderrTee(original, log_file)
+
+
+class _StderrTee:
+    """Forwards .write/.flush to two underlying streams. Anything else
+    is delegated to the original stream so the file-like contract
+    (encoding, isatty, fileno on the real one only, etc.) stays
+    intact for callers that introspect stderr."""
+    _stream_eval_teed = True
+
+    def __init__(self, original, log_file):
+        self._original = original
+        self._log_file = log_file
+
+    def write(self, data):
+        n = self._original.write(data)
+        try:
+            self._log_file.write(data)
+        except (OSError, ValueError):
+            # Disk full / file closed -- keep the original stderr
+            # working so the eval doesn't abort over a logging issue.
+            pass
+        return n
+
+    def flush(self):
+        try:
+            self._original.flush()
+        except OSError:
+            pass
+        try:
+            self._log_file.flush()
+        except (OSError, ValueError):
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
 def _git_dirty_set(cwd):
     """Return the set of repo-relative paths git considers dirty in `cwd`
     (modified, added, deleted, renamed, untracked-not-gitignored).
@@ -914,6 +977,15 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
         # available (or stderr is something exotic), continue with
         # default buffering rather than abort the eval.
         pass
+
+    # Tee stderr to a known location under ~/.claude/projects/ so the
+    # dashboard's file walk discovers this run without the operator
+    # having to redirect stderr by hand. Claude Code's Bash tool used
+    # to put background-process stderr under ~/.claude/projects/...
+    # /<id>.output, which the legacy monitor scanned; that path moved
+    # to /tmp/claude-501/ in recent versions, so the dashboard now
+    # sees nothing from real evals unless we write our own copy.
+    _install_stderr_tee()
     # Print the startup banner BEFORE assigning ids -- if assignment
     # raises, the harness still gets a banner-less abort, which is fine.
     print(
