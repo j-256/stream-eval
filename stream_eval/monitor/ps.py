@@ -42,8 +42,17 @@ def find_eval_workers():
     - started_at: psutil create_time (Unix epoch)
     - cmdline: full argv as a list
     """
-    for proc in psutil.process_iter(["pid", "ppid", "name", "cmdline",
-                                      "create_time"]):
+    # Don't prefetch attrs via process_iter([...]). On macOS, the
+    # prefetch path calls proc.cmdline() before our try/except can
+    # catch the race where a process exits between enumeration and
+    # attribute read -- and the C extension raises SystemError, not
+    # NoSuchProcess. Fetch attrs inside the loop body where the
+    # except clause covers them.
+    try:
+        procs = list(psutil.process_iter())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, SystemError):
+        return
+    for proc in procs:
         try:
             if not proc.is_running():
                 continue
@@ -69,7 +78,11 @@ def find_eval_workers():
                 "started_at": proc.create_time(),
                 "cmdline": cmdline,
             }
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.NoSuchProcess, psutil.AccessDenied,
+                SystemError):
+            # SystemError here is the macOS-only "process_cmdline
+            # raced with proc exit" failure -- treat it the same as
+            # the documented races.
             continue
 
 
@@ -157,7 +170,8 @@ def find_claude_workers_for(harness_pid):
                 "max_retries_field": stats["max_retries_field"],
                 "last_error": stats["last_error"],
             }
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.NoSuchProcess, psutil.AccessDenied,
+                SystemError):
             continue
     if not real_yielded:
         yield from _yield_fake_workers_for(harness_pid)
