@@ -1282,6 +1282,44 @@ class TestResolveHarnessVersion(unittest.TestCase):
             self.assertEqual(version, "abc1234567890abcdef1234567890abcdef123456")
             self.assertEqual(kind, "git_sha")
 
+    def test_resolves_from_git_submodule_gitfile(self):
+        """When stream-eval is consumed as a git submodule, the
+        package's parent has a .git FILE (not a directory) containing
+        `gitdir: ../path/to/real-git-dir`. The resolver must follow
+        that indirection. Without this, every submodule consumer's
+        results.json stamps the package version (`0.1.0`) instead of
+        the pinned SHA, breaking iteration-to-commit correlation."""
+        from stream_eval import runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            # The real .git/modules/<name>/ directory: this is where
+            # the parent repo stashes a submodule's metadata.
+            real_git = tmp / "parent" / ".git" / "modules" / "harness"
+            real_git.mkdir(parents=True)
+            (real_git / "HEAD").write_text("ref: refs/heads/main\n")
+            (real_git / "refs" / "heads").mkdir(parents=True)
+            (real_git / "refs" / "heads" / "main").write_text(
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n"
+            )
+
+            # The submodule checkout: package's parent has a .git
+            # FILE pointing at ../parent/.git/modules/harness via
+            # the relative path that submodules actually use.
+            sub_root = tmp / "parent" / "harness"
+            sub_root.mkdir()
+            (sub_root / ".git").write_text(
+                "gitdir: ../.git/modules/harness\n"
+            )
+
+            fake_pkg = sub_root / "stream_eval"
+            fake_pkg.mkdir()
+            (fake_pkg / "__init__.py").write_text("__version__ = '0.1.0'\n")
+
+            version, kind = runner._resolve_harness_version(package_dir=fake_pkg)
+            self.assertEqual(version, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            self.assertEqual(kind, "git_sha")
+
     def test_falls_back_to_package_version(self):
         """No .git directory anywhere -> fall back to __version__."""
         from stream_eval import runner

@@ -73,9 +73,24 @@ def _resolve_harness_version(package_dir=None):
     package_dir = Path(package_dir)
 
     # Look for a .git in the package's parent (the repo root in dev /
-    # submodule scenarios).
-    git_dir = package_dir.parent / ".git"
-    if git_dir.is_dir():
+    # submodule scenarios). Submodules use a .git FILE (not a dir)
+    # whose contents are `gitdir: <relative-path-to-real-git-dir>`,
+    # so we resolve that indirection before reading HEAD.
+    git_path = package_dir.parent / ".git"
+    git_dir = None
+    if git_path.is_dir():
+        git_dir = git_path
+    elif git_path.is_file():
+        try:
+            line = git_path.read_text().strip()
+        except OSError:
+            line = ""
+        if line.startswith("gitdir:"):
+            target = line[len("gitdir:"):].strip()
+            candidate = (git_path.parent / target).resolve()
+            if candidate.is_dir():
+                git_dir = candidate
+    if git_dir is not None:
         head_path = git_dir / "HEAD"
         if head_path.is_file():
             try:
