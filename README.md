@@ -250,7 +250,7 @@ What it shows:
 - **Segmented progress bar.** One cell per `(fixture, run)`. Green = pass, red = fail, gray = pending. Pass/fail colors come from the runner's `pass=` field on the canonical stderr line.
 - **Active subprocess table.** Per-worker runtime, total api_retry events, latest attempt N/M, last error.
 - **Recent completions table.** Last 5 completed runs per skill row, with elapsed + retry counts + first 80 chars of query.
-- **Session scoping.** The dashboard pins to one Claude Code session at a time. Layered detection: explicit `--session` flag, then this dashboard's own bash parent's `.output` file, then any live trigger/synthesis worker's bash parent, then youngest `.output` globally within `DASHBOARD_MAX_AGE_HOURS` (default 4h).
+- **Session scoping.** The dashboard pins to one Claude Code session at a time. Layered detection: explicit `--session` flag, then this dashboard's own bash parent's `.output` file, then any live trigger/synthesis worker's bash parent, then the youngest few `.output` files globally.
 - **JS polling.** 5s when active runs exist, 30s when idle, pauses after ~3 min of no change. Click "refresh now" to resume.
 - **Read-only.** The dashboard never spawns runs or writes anything except the HTTP responses. Safe to start/stop mid-eval.
 
@@ -269,10 +269,15 @@ All trailing fields (`timeout_reason`, `first_tool`, `first_skill`, `failed_asse
 
 Startup banner (emitted once before the first task completes):
 ```
-=== eval starting: kind=<kind> skill=<skill> eval=<eval-path> runs=<R> workers=<W> total_fixtures=<N> ===
+=== eval starting: kind=<kind> skill=<skill> eval=<eval-path> runs=<R> workers=<W> total_fixtures=<N> pid=<harness-pid> ===
 ```
 
-The dashboard parses both; `tail -f` on the underlying `.output` file is human-readable as-is.
+Finish banner (emitted after the last task scores or the harness aborts):
+```
+=== eval finished: kind=<kind> skill=<skill> pid=<harness-pid> verdict=<completed|aborted> ===
+```
+
+The dashboard joins startup and finish by `pid` to distinguish active runs from completed and aborted ones, and routes per-row worker-control buttons to `/tmp/stream-eval-<pid>.sock`. `tail -f` on the underlying `.output` file is human-readable as-is.
 
 ## Configuration via `.env`
 
@@ -282,7 +287,8 @@ The harnesses read configuration from `.env` at the repo root (gitignored) via `
 |---|---|---|
 | `STREAM_EVAL_MODEL` | `sonnet` | Model identifier passed to `claude -p --model`. Pin the exact gateway-accepted identifier (e.g. `claude-sonnet-4-6`) rather than relying on the `sonnet` alias, which resolves to the older Sonnet on this gateway. (Renamed from `DSC_EVAL_MODEL`.) |
 | `STREAM_EVAL_PROFILE` | `isolated` | Toolbelt profile (`isolated`, `restricted`, or `inherit`) for spawned `claude -p` subprocesses. (Renamed from `DSC_EVAL_PROFILE`; previous `default` profile renamed to `inherit`.) |
-| `DASHBOARD_MAX_AGE_HOURS` | `4` | Recent-fallback window for session detection in `stream_eval/monitor.py`. Stale `.output` files older than this don't surface as "this session". |
+| `STREAM_EVAL_OUTPUT_LIMIT` | `30` | Maximum `.output` files the dashboard parses on each refresh. Tunable upward for very busy operator setups. |
+| `STREAM_EVAL_PER_SKILL_CAP` | `5` | Per-(skill, kind) row cap. Active rows always bypass the cap; older completed/aborted rows are hidden once the cap is reached. Set to `0` to disable. |
 
 Existing environment values win over `.env`; `.env` only fills gaps. No-op if `.env` is missing.
 

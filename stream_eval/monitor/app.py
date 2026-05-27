@@ -1,7 +1,9 @@
 """Flask app for the live dashboard.
 
 Read-only dashboard renders DashboardState. Worker-control routes
-(`POST /workers/...`) talk to the harness over a Unix socket.
+(`POST /workers/<action>/<pid>`) talk to a specific harness over its
+Unix socket -- per-row routing means a +1 button on the dsc-scrape
+row never affects a concurrently-running dsc-triage eval.
 
 Public surface:
 - create_app(session): Flask application factory; the test client
@@ -11,8 +13,6 @@ Public surface:
 - print_summary(session): one-shot CLI summary (replaces the old
   no-arg `eval-monitor.py`).
 """
-import glob
-import os
 import time
 import webbrowser
 
@@ -22,16 +22,13 @@ from flask import (
 
 from stream_eval.monitor.ps import (
     detect_session,
-    find_eval_workers,
+    find_claude_workers_for,
     find_output_files,
 )
 from stream_eval.monitor.socket_client import (
     HarnessSocketClient, SocketClientError,
 )
 from stream_eval.monitor.state import build_state
-
-# Default socket path used when no specific path is found.
-_DEFAULT_SOCK_PATH = "/tmp/stream-eval-dashboard.sock"
 
 
 def create_app(session=None):
@@ -42,31 +39,13 @@ def create_app(session=None):
 
     def _gather_state():
         state = build_state(find_output_files())
-        active = list(find_eval_workers())
-        for w in active:
-            w["started_at_human"] = _humanize(time.time() - w["started_at"])
-        # Synthesize 'recent' from the last few cells across all rows.
-        # The real recent table comes from per-run elapsed/retries/query
-        # which DashboardCell doesn't carry today. F-iteration follow-up
-        # could enrich this; for now the recent table shows minimal info.
-        recent = []
         for row in state.rows:
-            for cell in reversed(row.cells[-5:]):
-                recent.append({
-                    "fixture_id": cell.fixture_id,
-                    "run": cell.run,
-                    "pass_": cell.pass_ if cell.pass_ is not None else False,
-                    "elapsed": 0.0,
-                    "retries": 0,
-                    "query": "",
-                })
-        target_workers = _try_get_target_workers()
+            row.target_workers = _row_target_workers(row)
+            row.workers_for_row = _claude_workers_for_row(row)
+            row.recent = _recent_for_row(row)
         return {
             "state": state,
-            "active_workers": active,
-            "recent": recent,
             "session": _resolve_session(),
-            "target_workers": target_workers,
         }
 
     @app.route("/", methods=["GET"])
@@ -76,80 +55,89 @@ def create_app(session=None):
             return render_template("partials/_dashboard_main.html", **ctx)
         return render_template("dashboard.html", **ctx)
 
-    def _action_response(action):
-        """Apply `action` to the harness socket, then render the
-        partial dashboard with the updated state. Returning the
-        partial inline (rather than 302-redirecting) means the UI
-        reflects the new target_workers / state immediately, without
-        waiting for the next poll cycle."""
-        _with_socket(action)
+    def _action_response_for_pid(pid, action):
+        """Apply `action` to the socket of the harness identified by
+        `pid`, then re-render the partial. Per-row pid lets us address
+        exactly one harness even when several are running concurrently;
+        the `youngest socket` heuristic the legacy app used would route
+        to whichever started most recently regardless of which row's
+        button was clicked."""
+        sock_path = f"/tmp/stream-eval-{pid}.sock"
+        client = HarnessSocketClient(sock_path)
+        try:
+            action(client)
+        except SocketClientError:
+            pass
         ctx = _gather_state()
         return render_template("partials/_dashboard_main.html", **ctx)
 
-    @app.route("/workers/+1", methods=["POST"], endpoint="workers_increment")
-    def workers_increment():
-        return _action_response(lambda c: c.increment())
+    @app.route("/workers/+1/<int:pid>", methods=["POST"],
+               endpoint="workers_increment")
+    def workers_increment(pid):
+        return _action_response_for_pid(pid, lambda c: c.increment())
 
-    @app.route("/workers/-1", methods=["POST"], endpoint="workers_decrement")
-    def workers_decrement():
-        return _action_response(lambda c: c.decrement())
+    @app.route("/workers/-1/<int:pid>", methods=["POST"],
+               endpoint="workers_decrement")
+    def workers_decrement(pid):
+        return _action_response_for_pid(pid, lambda c: c.decrement())
 
-    @app.route("/workers/pause", methods=["POST"], endpoint="workers_pause")
-    def workers_pause():
-        return _action_response(lambda c: c.pause())
+    @app.route("/workers/pause/<int:pid>", methods=["POST"],
+               endpoint="workers_pause")
+    def workers_pause(pid):
+        return _action_response_for_pid(pid, lambda c: c.pause())
 
-    @app.route("/workers/resume", methods=["POST"], endpoint="workers_resume")
-    def workers_resume():
-        return _action_response(lambda c: c.resume())
+    @app.route("/workers/resume/<int:pid>", methods=["POST"],
+               endpoint="workers_resume")
+    def workers_resume(pid):
+        return _action_response_for_pid(pid, lambda c: c.resume())
 
     return app
 
 
-def _with_socket(action):
-    """Locate the most-recent harness socket, construct a
-    HarnessSocketClient, and apply `action` to it. Silently absorbs
-    SocketClientError so a 'no harness running' state doesn't 500 the
-    dashboard.
-
-    We always instantiate HarnessSocketClient (rather than skipping when
-    no socket file exists) so that test patches on HarnessSocketClient
-    take effect -- the mock's __init__ succeeds even if the path is fake,
-    and SocketClientError from _send is what we absorb in production.
-    """
-    sock_path = _find_harness_socket() or _DEFAULT_SOCK_PATH
-    client = HarnessSocketClient(sock_path)
-    try:
-        action(client)
-    except SocketClientError:
-        pass
-
-
-def _find_harness_socket():
-    """Find the youngest /tmp/stream-eval-*.sock. Returns the path or
-    None. If multiple harnesses are running, the youngest is the one
-    the user most recently started -- a heuristic, not a contract."""
-    candidates = glob.glob("/tmp/stream-eval-*.sock")
-    if not candidates:
+def _row_target_workers(row):
+    """Read the live target_workers count from this row's harness
+    socket. Returns None for completed/aborted/unknown rows (no live
+    socket to talk to)."""
+    if row.status != "active" or row.harness_pid is None:
         return None
-    candidates.sort(key=lambda p: -_safe_mtime(p))
-    return candidates[0]
-
-
-def _safe_mtime(path):
-    try:
-        return os.stat(path).st_mtime
-    except OSError:
-        return 0
-
-
-def _try_get_target_workers():
-    sock_path = _find_harness_socket()
-    if not sock_path:
-        return None
+    sock_path = f"/tmp/stream-eval-{row.harness_pid}.sock"
     try:
         return HarnessSocketClient(sock_path).get_workers()
     except SocketClientError:
         return None
+
+
+def _claude_workers_for_row(row):
+    """Return [{pid, started_at_human, cmdline}, ...] for the live
+    `claude -p` children of this row's harness pid. Empty list for
+    completed/aborted/unknown rows or when the harness has no children
+    at this poll instant."""
+    if row.status != "active" or row.harness_pid is None:
+        return []
+    out = []
+    for w in find_claude_workers_for(row.harness_pid):
+        w["started_at_human"] = _humanize(time.time() - w["started_at"])
+        out.append(w)
+    return out
+
+
+def _recent_for_row(row):
+    """Last 5 cells for this row, rendered as recent-completion records.
+
+    DashboardCell only carries (fixture_id, run, pass_, contaminated)
+    today -- elapsed/retries/first_tool/first_skill/asserts/query are
+    on the runner's progress line but not retained in state.py. F.5.5
+    can pull those forward; for now we surface what we have and leave
+    the richer fields blank."""
+    out = []
+    for cell in reversed(row.cells[-5:]):
+        out.append({
+            "fixture_id": cell.fixture_id,
+            "run": cell.run,
+            "pass_": cell.pass_ if cell.pass_ is not None else False,
+            "contaminated": cell.contaminated,
+        })
+    return out
 
 
 def _humanize(seconds):
@@ -176,5 +164,9 @@ def print_summary(session=None):
     for row in state.rows:
         passed = sum(1 for c in row.cells if c.pass_ is True)
         total = row.total_fixtures * row.runs
-        print(f"  {row.skill} ({row.kind}): {passed}/{total}")
+        pid_label = f" pid={row.harness_pid}" if row.harness_pid else ""
+        print(
+            f"  [{row.status}] {row.skill} ({row.kind}){pid_label}: "
+            f"{passed}/{total}"
+        )
     return 0

@@ -5,6 +5,7 @@ guard the contract."""
 import pytest
 
 from stream_eval.monitor.parsing import (
+    parse_finish_banner,
     parse_progress_line,
     parse_startup_banner,
 )
@@ -55,7 +56,7 @@ def test_parse_startup_banner_typical():
     line = (
         "=== eval starting: kind=trigger skill=dsc-scrape "
         "eval=evals/dsc-scrape/trigger-eval.json runs=3 workers=4 "
-        "total_fixtures=12 ==="
+        "total_fixtures=12 pid=42 ==="
     )
     parsed = parse_startup_banner(line)
     assert parsed["kind"] == "trigger"
@@ -64,8 +65,52 @@ def test_parse_startup_banner_typical():
     assert parsed["runs"] == 3
     assert parsed["workers"] == 4
     assert parsed["total_fixtures"] == 12
+    assert parsed["pid"] == 42
+
+
+def test_parse_startup_banner_legacy_without_pid():
+    """Banners written before F.5 don't carry pid=. The parser must
+    return pid=None rather than crashing -- otherwise the dashboard
+    would fail to render any row whose .output predates F.5."""
+    line = (
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=3 workers=4 "
+        "total_fixtures=12 ==="
+    )
+    parsed = parse_startup_banner(line)
+    assert parsed is not None
+    assert parsed["pid"] is None
 
 
 def test_parse_startup_banner_returns_none_for_non_banner_text():
     assert parse_startup_banner("[1/10] kind=trigger ...") is None
     assert parse_startup_banner("") is None
+
+
+def test_parse_finish_banner_completed():
+    line = (
+        "=== eval finished: kind=trigger skill=dsc-scrape "
+        "pid=42 verdict=completed ==="
+    )
+    parsed = parse_finish_banner(line)
+    assert parsed["kind"] == "trigger"
+    assert parsed["skill"] == "dsc-scrape"
+    assert parsed["pid"] == 42
+    assert parsed["verdict"] == "completed"
+
+
+def test_parse_finish_banner_aborted():
+    line = (
+        "=== eval finished: kind=synthesis skill=dsc-scenario "
+        "pid=99 verdict=aborted ==="
+    )
+    parsed = parse_finish_banner(line)
+    assert parsed["verdict"] == "aborted"
+
+
+def test_parse_finish_banner_returns_none_for_non_banner_text():
+    assert parse_finish_banner("[1/10] kind=trigger ...") is None
+    assert parse_finish_banner(
+        "=== eval starting: kind=trigger skill=dsc-scrape ..."
+    ) is None
+    assert parse_finish_banner("") is None

@@ -10,7 +10,18 @@ header { display: flex; align-items: baseline; gap: 1rem;
               margin-bottom: 0.25rem; }
 .skill { font-weight: bold; }
 .kind { color: #888; font-size: 0.9rem; }
+.harness-pid { color: #888; font-family: ui-monospace, monospace;
+               font-size: 0.8rem; }
+.status { font-size: 0.75rem; padding: 0.1rem 0.4rem;
+          border-radius: 3px; text-transform: uppercase;
+          letter-spacing: 0.05em; }
+.status-active { background: #1976d2; color: #fff; }
+.status-completed { background: #4caf50; color: #fff; }
+.status-aborted { background: #e53935; color: #fff; }
+.status-unknown { background: #888; color: #fff; }
 .qpass { margin-left: auto; }
+.row-workers, .row-recent { margin-top: 0.4rem; font-size: 0.85rem; }
+.row-workers summary, .row-recent summary { cursor: pointer; color: #555; }
 .bar { display: flex; flex-wrap: wrap; gap: 1px; }
 .cell { width: 12px; height: 18px; border-radius: 1px; }
 .cell.pass { background: #4caf50; }
@@ -20,15 +31,11 @@ header { display: flex; align-items: baseline; gap: 1rem;
    so an eval-Sonnet that polluted the worktree mid-run is visible at a
    glance. The pass verdict on a contaminated run is unaudited. */
 .cell.contaminated { outline: 2px solid #f9a825; outline-offset: -1px; }
-.controls, .global-controls {
+.controls {
   margin-top: 0.5rem; display: flex; gap: 0.5rem;
   align-items: center; font-size: 0.9rem;
 }
-.global-controls { margin: 0.5rem 0 1rem 0; padding: 0.5rem;
-                   border: 1px solid #eee; border-radius: 4px; }
-.controls button, .global-controls button {
-  padding: 0.2rem 0.5rem; cursor: pointer;
-}
+.controls button { padding: 0.2rem 0.5rem; cursor: pointer; }
 .workers-current { color: #666; }
 .workers-count { font-weight: bold; color: #222; }
 table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
@@ -46,7 +53,9 @@ tr.fail { background: #fff5f5; }
   body { background: #1a1a1a; color: #e0e0e0; }
   header { border-bottom-color: #333; }
   .session, .kind, .workers-current, .empty, .query { color: #999; }
-  .row, .global-controls { border-color: #333; background: #232323; }
+  .row { border-color: #333; background: #232323; }
+  .row-workers summary, .row-recent summary { color: #aaa; }
+  .harness-pid { color: #888; }
   .skill, .workers-count { color: #f0f0f0; }
   .cell.pass { background: #2e7d32; }
   .cell.fail { background: #c62828; }

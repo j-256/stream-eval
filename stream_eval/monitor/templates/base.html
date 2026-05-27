@@ -56,13 +56,13 @@
       refresh();
     });
 
-    /* Intercept worker-control form submits (.row .controls form for
-       per-row controls and .global-controls form for the always-visible
-       top-of-dashboard buttons). POST to the form's action, replace
-       <main> with the response body, and restart the polling cycle. */
+    /* Intercept worker-control form submits. POST to the form's action,
+       replace <main> with the response body, and restart the polling
+       cycle. As of F.5 every row has its own controls (no global
+       controls block), so the selector is simply .row .controls form. */
     document.addEventListener("submit", async (ev) => {
       const form = ev.target;
-      if (!form.matches(".row .controls form, .global-controls form")) return;
+      if (!form.matches(".row .controls form")) return;
       ev.preventDefault();
       try {
         const res = await fetch(form.action, { method: "POST" });

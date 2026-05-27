@@ -251,21 +251,64 @@ STARTUP_BANNER_RE = re.compile(
     r"eval=(?P<eval>\S+)\s+"
     r"runs=(?P<runs>\d+)\s+"
     r"workers=(?P<workers>\d+)\s+"
-    r"total_fixtures=(?P<total_fixtures>\d+)\s*===",
+    r"total_fixtures=(?P<total_fixtures>\d+)"
+    # pid= is optional so the regex still parses banners written before
+    # F.5 added per-eval pid routing. New runs always include it.
+    r"(?:\s+pid=(?P<pid>\d+))?"
+    r"\s*===",
     re.MULTILINE,
 )
 
 
+# Companion to STARTUP_BANNER_RE: emitted at the end of run_eval. The
+# dashboard joins startup -> finish to classify a row as "completed" vs
+# "aborted" without needing to peek at results.json paths or guess from
+# pid liveness alone (which is racy: a harness can have already exited
+# cleanly by the time the dashboard polls).
+FINISH_BANNER_RE = re.compile(
+    r"^\s*=== eval finished: "
+    r"kind=(?P<kind>trigger|synthesis)\s+"
+    r"skill=(?P<skill>\S+)\s+"
+    r"pid=(?P<pid>\d+)\s+"
+    r"verdict=(?P<verdict>completed|aborted)"
+    r"\s*===",
+    re.MULTILINE,
+)
+
+
+def format_finish_banner(*, kind, skill, verdict, pid=None):
+    """The runner emits this to stderr after the last task finishes.
+
+    verdict is "completed" if every dispatched task scored (pass or
+    fail), "aborted" if the harness bailed early (timeout, throttle,
+    Ctrl-C). The dashboard pairs this with the startup banner to label
+    the row's status; without it, the dashboard would have to rely on
+    pid-still-alive, which races against fast harness exits.
+    """
+    if pid is None:
+        pid = os.getpid()
+    return (
+        f"=== eval finished: "
+        f"kind={kind} "
+        f"skill={skill} "
+        f"pid={pid} "
+        f"verdict={verdict} ==="
+    )
+
+
 def format_startup_banner(*, kind, skill, eval_path, runs, workers,
-                          total_fixtures):
+                          total_fixtures, pid=None):
     """The runner emits this to stderr before the first task completes.
 
     stream_eval.monitor parses it from each .output file to bind finished
-    runs to (skill, kind) without inferring from now-removed
-    'first_skill=' fields. total_fixtures lets the dashboard render an
-    authoritative qpass denominator from the start of the run, before
-    any rows have arrived.
+    runs to (skill, kind, harness_pid). total_fixtures lets the dashboard
+    render an authoritative qpass denominator from the start of the run,
+    before any rows have arrived. pid identifies the harness process so
+    each row's worker-control buttons route to its own /tmp/stream-eval-
+    <pid>.sock; defaults to os.getpid() so callers don't have to pass it.
     """
+    if pid is None:
+        pid = os.getpid()
     return (
         f"=== eval starting: "
         f"kind={kind} "
@@ -273,7 +316,8 @@ def format_startup_banner(*, kind, skill, eval_path, runs, workers,
         f"eval={eval_path} "
         f"runs={runs} "
         f"workers={workers} "
-        f"total_fixtures={total_fixtures} ==="
+        f"total_fixtures={total_fixtures} "
+        f"pid={pid} ==="
     )
 
 
@@ -1085,6 +1129,12 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
     harness_version, harness_version_kind = _resolve_harness_version()
     envelope["harness_version"] = harness_version
     envelope["harness_version_kind"] = harness_version_kind
+
+    verdict = "aborted" if aborted_on_timeout else "completed"
+    print(
+        format_finish_banner(kind=kind, skill=skill_name, verdict=verdict),
+        file=sys.stderr,
+    )
 
     if aborted_on_timeout:
         return envelope, 3

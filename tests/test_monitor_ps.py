@@ -69,3 +69,46 @@ def test_find_eval_workers_recognizes_console_script_form():
         workers = list(find_eval_workers())
     assert len(workers) == 1
     assert workers[0]["kind"] == "trigger"
+
+
+def test_find_claude_workers_for_returns_claude_children():
+    """Children of the harness pid that are running `claude -p` should
+    surface; non-claude children (e.g. a git subprocess) should not."""
+    from stream_eval.monitor.ps import find_claude_workers_for
+
+    parent = _fake_proc(
+        100, 1, "python3",
+        ["python3", "-m", "stream_eval.cli", "trigger"],
+        1.0,
+    )
+    child_claude = _fake_proc(
+        201, 100, "claude",
+        ["claude", "-p", "--output-format", "stream-json"],
+        2.0,
+    )
+    child_git = _fake_proc(
+        202, 100, "git",
+        ["git", "status", "--porcelain"],
+        2.5,
+    )
+    parent.children = mock.MagicMock(return_value=[child_claude, child_git])
+
+    with mock.patch("stream_eval.monitor.ps.psutil.Process",
+                    return_value=parent):
+        workers = list(find_claude_workers_for(100))
+    assert len(workers) == 1
+    assert workers[0]["pid"] == 201
+
+
+def test_find_claude_workers_for_returns_empty_when_parent_missing():
+    """A dead/never-existed harness pid yields nothing rather than
+    raising. The dashboard polls into this every refresh and must
+    tolerate the harness exiting between renders."""
+    import psutil
+
+    from stream_eval.monitor.ps import find_claude_workers_for
+
+    with mock.patch("stream_eval.monitor.ps.psutil.Process",
+                    side_effect=psutil.NoSuchProcess(pid=999)):
+        workers = list(find_claude_workers_for(999))
+    assert workers == []

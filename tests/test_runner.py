@@ -12,6 +12,8 @@ from stream_eval.runner import (
     FixtureSchemaError,
     _format_progress,
     PROGRESS_LINE_RE,
+    FINISH_BANNER_RE,
+    format_finish_banner,
     format_startup_banner,
     STARTUP_BANNER_RE,
 )
@@ -228,7 +230,7 @@ class TestStartupBanner(unittest.TestCase):
             kind="trigger",
             skill="dsc-triage",
             eval_path="evals/dsc-triage/trigger-eval.json",
-            runs=3, workers=4, total_fixtures=23,
+            runs=3, workers=4, total_fixtures=23, pid=12345,
         )
         m = STARTUP_BANNER_RE.search(line)
         self.assertIsNotNone(m, f"banner regex did not match: {line!r}")
@@ -242,18 +244,48 @@ class TestStartupBanner(unittest.TestCase):
         self.assertEqual(groups["runs"], "3")
         self.assertEqual(groups["workers"], "4")
         self.assertEqual(groups["total_fixtures"], "23")
+        self.assertEqual(groups["pid"], "12345")
 
     def test_banner_handles_synthesis_kind(self):
         line = format_startup_banner(
             kind="synthesis",
             skill="dsc-scrape",
             eval_path="evals/dsc-scrape/synthesis-eval.json",
-            runs=5, workers=4, total_fixtures=2,
+            runs=5, workers=4, total_fixtures=2, pid=99999,
         )
         m = STARTUP_BANNER_RE.search(line)
         self.assertIsNotNone(m)
         self.assertEqual(m.group("kind"), "synthesis")
         self.assertEqual(m.group("total_fixtures"), "2")
+        self.assertEqual(m.group("pid"), "99999")
+
+    def test_banner_pid_defaults_to_current_process(self):
+        """When called without an explicit pid, the banner stamps
+        os.getpid() so the dashboard can bind .output files to the
+        right harness process without callers having to remember."""
+        import os
+        line = format_startup_banner(
+            kind="trigger",
+            skill="dsc-scrape",
+            eval_path="evals/dsc-scrape/trigger-eval.json",
+            runs=1, workers=1, total_fixtures=1,
+        )
+        m = STARTUP_BANNER_RE.search(line)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("pid"), str(os.getpid()))
+
+    def test_banner_legacy_form_without_pid_still_parses(self):
+        """Banners written by tools/ before F.5 don't carry pid=. The
+        regex must still match so existing .output files survive a
+        re-parse without crashing the dashboard."""
+        legacy = (
+            "=== eval starting: kind=trigger skill=dsc-scrape "
+            "eval=evals/dsc-scrape/trigger-eval.json "
+            "runs=3 workers=4 total_fixtures=10 ==="
+        )
+        m = STARTUP_BANNER_RE.search(legacy)
+        self.assertIsNotNone(m)
+        self.assertIsNone(m.group("pid"))
 
     def test_banner_shaped_substring_does_not_match(self):
         """A banner-shaped substring embedded inside a longer line (e.g.
@@ -265,6 +297,44 @@ class TestStartupBanner(unittest.TestCase):
             'runs=3 workers=4 total_fixtures=10 ==="'
         )
         self.assertIsNone(STARTUP_BANNER_RE.search(embedded))
+
+
+class TestFinishBanner(unittest.TestCase):
+    def test_finish_completed_round_trips(self):
+        line = format_finish_banner(
+            kind="trigger", skill="dsc-scrape",
+            verdict="completed", pid=12345,
+        )
+        m = FINISH_BANNER_RE.search(line)
+        self.assertIsNotNone(m, f"finish regex did not match: {line!r}")
+        self.assertEqual(m.group("kind"), "trigger")
+        self.assertEqual(m.group("skill"), "dsc-scrape")
+        self.assertEqual(m.group("pid"), "12345")
+        self.assertEqual(m.group("verdict"), "completed")
+
+    def test_finish_aborted_round_trips(self):
+        line = format_finish_banner(
+            kind="synthesis", skill="dsc-scenario",
+            verdict="aborted", pid=99999,
+        )
+        m = FINISH_BANNER_RE.search(line)
+        self.assertEqual(m.group("verdict"), "aborted")
+
+    def test_finish_pid_defaults_to_current_process(self):
+        import os
+        line = format_finish_banner(
+            kind="trigger", skill="x", verdict="completed",
+        )
+        m = FINISH_BANNER_RE.search(line)
+        self.assertEqual(m.group("pid"), str(os.getpid()))
+
+    def test_finish_does_not_match_startup(self):
+        startup = (
+            "=== eval starting: kind=trigger skill=dsc-scrape "
+            "eval=evals/dsc-scrape/trigger-eval.json "
+            "runs=3 workers=4 total_fixtures=10 pid=42 ==="
+        )
+        self.assertIsNone(FINISH_BANNER_RE.search(startup))
 
 
 import tempfile

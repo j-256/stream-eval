@@ -1,7 +1,11 @@
-<div class="row">
+<div class="row" data-status="{{ row.status }}">
   <div class="row-header">
     <span class="skill">{{ row.skill }}</span>
     <span class="kind">{{ row.kind }}</span>
+    <span class="status status-{{ row.status }}">{{ row.status }}</span>
+    {% if row.harness_pid is not none %}
+      <span class="harness-pid">pid {{ row.harness_pid }}</span>
+    {% endif %}
     {% set total = row.total_fixtures * row.runs %}
     {% set passed = row.cells | selectattr('pass_', 'equalto', true) | list | length %}
     <span class="qpass">{{ passed }}/{{ total }} pass</span>
@@ -16,19 +20,37 @@
       <span class="cell pending"></span>
     {% endfor %}
   </div>
-  <div class="controls">
-    <form method="post" action="{{ url_for('workers_decrement') }}" style="display:inline">
-      <button type="submit">-1</button>
-    </form>
-    <span class="workers-current">workers: <span class="workers-count">{{ target_workers if target_workers is not none else '?' }}</span></span>
-    <form method="post" action="{{ url_for('workers_increment') }}" style="display:inline">
-      <button type="submit">+1</button>
-    </form>
-    <form method="post" action="{{ url_for('workers_pause') }}" style="display:inline">
-      <button type="submit">pause</button>
-    </form>
-    <form method="post" action="{{ url_for('workers_resume') }}" style="display:inline">
-      <button type="submit">resume</button>
-    </form>
-  </div>
+  {% if row.status == "active" and row.harness_pid is not none %}
+    <div class="controls">
+      <span class="workers-current">workers: <span class="workers-count">{{ row.target_workers if row.target_workers is not none else '?' }}</span></span>
+      <form method="post" action="{{ url_for('workers_decrement', pid=row.harness_pid) }}" style="display:inline">
+        <button type="submit">-1</button>
+      </form>
+      <form method="post" action="{{ url_for('workers_increment', pid=row.harness_pid) }}" style="display:inline">
+        <button type="submit">+1</button>
+      </form>
+      <form method="post" action="{{ url_for('workers_pause', pid=row.harness_pid) }}" style="display:inline">
+        <button type="submit">pause</button>
+      </form>
+      <form method="post" action="{{ url_for('workers_resume', pid=row.harness_pid) }}" style="display:inline">
+        <button type="submit">resume</button>
+      </form>
+    </div>
+  {% endif %}
+  {% if row.workers_for_row %}
+    <details class="row-workers">
+      <summary>Active workers ({{ row.workers_for_row | length }})</summary>
+      {% with active_workers = row.workers_for_row %}
+        {% include "partials/workers_table.html" %}
+      {% endwith %}
+    </details>
+  {% endif %}
+  {% if row.recent %}
+    <details class="row-recent">
+      <summary>Recent completions ({{ row.recent | length }})</summary>
+      {% with recent = row.recent %}
+        {% include "partials/recent_table.html" %}
+      {% endwith %}
+    </details>
+  {% endif %}
 </div>

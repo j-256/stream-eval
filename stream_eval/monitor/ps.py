@@ -9,12 +9,11 @@ Public surface:
 - detect_session(explicit=None): return the Claude Code session id
   the dashboard should pin to, using the layered fallback (explicit ->
   parent bash -> live worker -> recent .output file).
-- find_output_files(max_age_hours): return paths of recent .output
-  files within the age window.
+- find_output_files(limit): return the youngest .output paths
+  (default last 30 by mtime).
 """
 import os
 import re
-import time
 from pathlib import Path
 
 import psutil
@@ -72,6 +71,53 @@ def find_eval_workers():
             continue
 
 
+def find_claude_workers_for(harness_pid):
+    """Yield one dict per live `claude -p` child of `harness_pid`.
+
+    Each harness spawns one or more `claude -p` subprocesses (one per
+    in-flight fixture run). The dashboard surfaces them under the
+    harness's row so the operator sees what's actually executing
+    versus just the parent's existence.
+
+    Fields per child:
+    - pid: claude subprocess pid
+    - started_at: psutil create_time (Unix epoch)
+    - cmdline: full argv
+    """
+    try:
+        parent = psutil.Process(harness_pid)
+    except psutil.NoSuchProcess:
+        return
+    try:
+        children = parent.children(recursive=False)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return
+    for child in children:
+        try:
+            if not child.is_running():
+                continue
+            cmd = child.cmdline()
+            if not cmd:
+                continue
+            # The runner spawns claude via either an absolute path or
+            # the PATH-resolved name; the cmdline always includes
+            # 'claude' as the binary basename. Filter to those: a
+            # Python `find_eval_workers`-style harness child would
+            # have 'python3' or similar.
+            if not any("claude" in tok for tok in cmd[:1]):
+                # Be a bit more lenient: some launchers wrap claude;
+                # accept if 'claude' appears anywhere in argv[0..2].
+                if not any("claude" in tok for tok in cmd[:3]):
+                    continue
+            yield {
+                "pid": child.pid,
+                "started_at": child.create_time(),
+                "cmdline": cmd,
+            }
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+
 def _extract_flag_value(cmdline, flag):
     """Find `<flag> <value>` in cmdline; return value or None."""
     for i, tok in enumerate(cmdline):
@@ -93,7 +139,8 @@ def detect_session(explicit=None):
     1. explicit (from --session): returned as-is.
     2. The dashboard's own bash parent's $CLAUDE_SESSION_ID env var.
     3. Any live trigger/synthesis worker's bash-parent session id.
-    4. The youngest .output file's session id, within DASHBOARD_MAX_AGE_HOURS.
+    4. The youngest few .output files' session ids (capped to avoid
+       walking thousands of historical files).
     Returns None if no session can be determined.
     """
     if explicit:
@@ -105,13 +152,10 @@ def detect_session(explicit=None):
         sid = _session_from_parent(w["pid"])
         if sid:
             return sid
-    age_hours = float(os.environ.get("DASHBOARD_MAX_AGE_HOURS", "4"))
-    cutoff = time.time() - age_hours * 3600
-    for path in _output_paths():
-        if path.stat().st_mtime >= cutoff:
-            sid = _session_from_output_path(path)
-            if sid:
-                return sid
+    for path in find_output_files(limit=10):
+        sid = _session_from_output_path(path)
+        if sid:
+            return sid
     return None
 
 
@@ -164,9 +208,30 @@ def _session_from_output_path(path):
     return None
 
 
-def find_output_files(max_age_hours=None):
-    """Return the list of .output paths within the age window."""
-    if max_age_hours is None:
-        max_age_hours = float(os.environ.get("DASHBOARD_MAX_AGE_HOURS", "4"))
-    cutoff = time.time() - max_age_hours * 3600
-    return [p for p in _output_paths() if p.stat().st_mtime >= cutoff]
+def find_output_files(*, limit=None):
+    """Return the youngest .output paths under ~/.claude/projects.
+
+    The legacy 4h time-window model produced surprises: a long-running
+    eval on the previous day vanished from the dashboard mid-run, and
+    a quiet morning showed nothing despite recent completions. The
+    last-N model is more predictable -- we always show the youngest
+    `limit` files by mtime, and the per-skill cap is applied later in
+    state.build_state so 'active' rows aren't dropped by accident.
+
+    `limit` defaults to STREAM_EVAL_OUTPUT_LIMIT or 30. Set very high
+    or pass limit=None to disable the cap entirely (for one-shot CLI
+    summaries that want everything).
+    """
+    if limit is None:
+        limit = int(os.environ.get("STREAM_EVAL_OUTPUT_LIMIT", "30"))
+    paths = []
+    for p in _output_paths():
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        paths.append((mtime, p))
+    paths.sort(key=lambda pair: -pair[0])
+    if limit is not None:
+        paths = paths[:limit]
+    return [p for _mt, p in paths]
