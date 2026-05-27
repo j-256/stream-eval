@@ -45,6 +45,61 @@ def get_current_dispatcher():
     to bind their commands to the current run."""
     return _CURRENT_DISPATCHER
 
+
+def _resolve_harness_version(package_dir=None):
+    """Identify this harness's version for the results envelope.
+
+    Lookup order:
+    1. If a .git directory exists at package_dir/.. (e.g. submodule
+       checkout, dev install), read .git/HEAD. If it's a `ref: ...`
+       reference, resolve to the actual SHA via .git/refs/.... If it's
+       a SHA directly (detached HEAD), use it. Returns (sha, "git_sha").
+    2. Otherwise, return (stream_eval.__version__, "package_version").
+    3. If __version__ is missing, return ("unknown", "unknown").
+
+    `package_dir` is the directory containing __init__.py; defaults to
+    the real stream_eval package's directory. Override in tests.
+    """
+    if package_dir is None:
+        import stream_eval
+        package_dir = Path(stream_eval.__file__).resolve().parent
+    package_dir = Path(package_dir)
+
+    # Look for a .git in the package's parent (the repo root in dev /
+    # submodule scenarios).
+    git_dir = package_dir.parent / ".git"
+    if git_dir.is_dir():
+        head_path = git_dir / "HEAD"
+        if head_path.is_file():
+            head = head_path.read_text().strip()
+            if head.startswith("ref:"):
+                ref = head[len("ref:"):].strip()
+                ref_file = git_dir / ref
+                if ref_file.is_file():
+                    sha = ref_file.read_text().strip()
+                    if sha:
+                        return (sha, "git_sha")
+                # Fall through to next strategy if ref unresolvable.
+            else:
+                # Detached HEAD; HEAD itself is the SHA.
+                if head:
+                    return (head, "git_sha")
+
+    # Fallback: package __version__.
+    init = package_dir / "__init__.py"
+    if init.is_file():
+        text = init.read_text()
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("__version__"):
+                # Tolerate single or double quotes.
+                _, _, val = line.partition("=")
+                val = val.strip().strip("'").strip('"')
+                if val:
+                    return (val, "package_version")
+
+    return ("unknown", "unknown")
+
 # MCP and Agent strip flags. Used by both `isolated` and `restricted`
 # profiles below; pulled out to a constant so the two stay in sync if the
 # strip set ever changes.
@@ -1010,6 +1065,10 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
         "contaminated_runs": contaminated_runs,
         "results": summary,
     }
+
+    harness_version, harness_version_kind = _resolve_harness_version()
+    envelope["harness_version"] = harness_version
+    envelope["harness_version_kind"] = harness_version_kind
 
     if aborted_on_timeout:
         return envelope, 3

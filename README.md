@@ -286,6 +286,26 @@ The harnesses read configuration from `.env` at the repo root (gitignored) via `
 
 Existing environment values win over `.env`; `.env` only fills gaps. No-op if `.env` is missing.
 
+## Results envelope: `harness_version`
+
+Every results.json the harness writes includes:
+
+```json
+{
+  "harness_version": "abc1234...",
+  "harness_version_kind": "git_sha",
+  ...
+}
+```
+
+`harness_version_kind` is one of:
+
+- `"git_sha"`: read from the harness's `.git/HEAD`. Stable across runs at the same checkout; changes when you update the submodule or switch branches.
+- `"package_version"`: read from `stream_eval.__version__`. Reported when the harness is pip-installed from a release tarball with no `.git` available.
+- `"unknown"`: neither lookup succeeded. Should not happen in normal installs.
+
+Iteration notes can cite this directly so eval numbers stay correlatable across harness churn.
+
 ## Limitations and out-of-scope
 
 - **Sequential dashboard binding for finished runs.** A skill's finished `.output` file is bound to `(skill, kind)` via the runner's startup banner, which means pre-rename `.output` files (from the probe-eval era) don't surface. They're not deleted; they just fall through silently.

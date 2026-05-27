@@ -1164,5 +1164,119 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
         )
 
 
+import tempfile
+
+
+class TestResolveHarnessVersion(unittest.TestCase):
+    """_resolve_harness_version reads .git/HEAD when available, falls
+    back to stream_eval.__version__, returns ('unknown', 'unknown') if
+    neither lookup works."""
+
+    def test_resolves_from_git_head_branch_ref(self):
+        """When the package lives in a git repo whose HEAD points at a
+        branch ref, _resolve_harness_version returns the resolved SHA."""
+        from stream_eval import runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            git_dir = tmp / ".git"
+            git_dir.mkdir()
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+            (git_dir / "refs" / "heads").mkdir(parents=True)
+            (git_dir / "refs" / "heads" / "main").write_text(
+                "abc1234567890abcdef1234567890abcdef123456\n"
+            )
+
+            fake_pkg = tmp / "stream_eval"
+            fake_pkg.mkdir()
+            (fake_pkg / "__init__.py").write_text("__version__ = '9.9.9'\n")
+
+            version, kind = runner._resolve_harness_version(package_dir=fake_pkg)
+            self.assertEqual(version, "abc1234567890abcdef1234567890abcdef123456")
+            self.assertEqual(kind, "git_sha")
+
+    def test_resolves_from_detached_head(self):
+        """When HEAD contains a SHA directly (detached HEAD), use it."""
+        from stream_eval import runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            git_dir = tmp / ".git"
+            git_dir.mkdir()
+            (git_dir / "HEAD").write_text(
+                "abc1234567890abcdef1234567890abcdef123456\n"
+            )
+
+            fake_pkg = tmp / "stream_eval"
+            fake_pkg.mkdir()
+            (fake_pkg / "__init__.py").write_text("__version__ = '9.9.9'\n")
+
+            version, kind = runner._resolve_harness_version(package_dir=fake_pkg)
+            self.assertEqual(version, "abc1234567890abcdef1234567890abcdef123456")
+            self.assertEqual(kind, "git_sha")
+
+    def test_falls_back_to_package_version(self):
+        """No .git directory anywhere -> fall back to __version__."""
+        from stream_eval import runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fake_pkg = tmp / "stream_eval"
+            fake_pkg.mkdir()
+            (fake_pkg / "__init__.py").write_text("__version__ = '0.5.7'\n")
+
+            version, kind = runner._resolve_harness_version(package_dir=fake_pkg)
+            self.assertEqual(version, "0.5.7")
+            self.assertEqual(kind, "package_version")
+
+    def test_unknown_when_neither_works(self):
+        """Missing .git AND missing __version__ attr -> 'unknown'."""
+        from stream_eval import runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fake_pkg = tmp / "stream_eval"
+            fake_pkg.mkdir()
+            (fake_pkg / "__init__.py").write_text("# no version\n")
+
+            version, kind = runner._resolve_harness_version(package_dir=fake_pkg)
+            self.assertEqual(version, "unknown")
+            self.assertEqual(kind, "unknown")
+
+
+class TestRunEvalEnvelope(unittest.TestCase):
+    """The results envelope must include harness_version and
+    harness_version_kind fields so iteration notes can correlate
+    numbers to a specific harness commit."""
+
+    def test_run_eval_writes_harness_version_to_results(self):
+        """Run an empty fixture set so no real claude -p is invoked.
+        The envelope is built regardless of whether any tasks ran."""
+        from stream_eval import runner
+
+        results, exit_code = runner.run_eval(
+            kind="trigger",
+            fixtures=[],
+            get_fixture_id=lambda fx: fx.get("name"),
+            get_query=lambda fx: fx.get("query", ""),
+            score_run=lambda fx, tp, b: (True, {}),
+            summarize=lambda x: [],
+            runs_per_fixture=1,
+            workers=1,
+            timeout=10,
+            cwd=os.getcwd(),
+            transcript_dir=None,
+            summary_label="queries",
+            skill_name="testskill",
+            eval_path="dummy.json",
+        )
+        self.assertIn("harness_version", results)
+        self.assertIn("harness_version_kind", results)
+        self.assertIn(
+            results["harness_version_kind"],
+            ("git_sha", "package_version", "unknown"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

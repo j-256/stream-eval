@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `harness_version` and `harness_version_kind` fields in every results.json envelope, derived from .git/HEAD or stream_eval.__version__.
 - Initial repository scaffolding.
 - Imported eval harness from claude-code-skills/tools/.
 - Single `stream-eval` CLI binary with `trigger`, `synthesis`, `monitor` subcommands.
