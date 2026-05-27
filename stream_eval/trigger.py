@@ -178,77 +178,81 @@ def main(argv=None):
         target=serve_socket, args=(sock_path,), daemon=True
     ).start()
 
-    cwd = args.cwd or os.getcwd()
-    queries = json.load(open(args.eval))
-
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    transcript_dir = transcript_dir_for(out_path)
-
-    score_callback = functools.partial(
-        score_trigger_run, target_skill=skill_name,
-    )
-
-    def summarize(fixtures_with_runs):
-        summary = []
-        for entry in fixtures_with_runs:
-            fx = entry["fixture"]
-            runs = entry["runs"]
-            # score_trigger_run sets pass_ = triggered, so the runner's
-            # canonical pass_ field is the per-run trigger result. Use
-            # it directly rather than re-reading kind_extra.triggered.
-            triggers = sum(1 for r in runs if r["pass_"])
-            rate = triggers / len(runs) if runs else 0
-            did_pass = (
-                (rate >= 0.5) if fx["should_trigger"]
-                else (rate < 0.5)
-            )
-            summary.append({
-                "query": fx["query"],
-                "should_trigger": fx["should_trigger"],
-                "triggers": triggers,
-                "runs": len(runs),
-                "pass": did_pass,
-                "run_details": runs,
-            })
-        return summary
-
-    results, exit_code = run_eval(
-        kind="trigger",
-        fixtures=queries,
-        get_fixture_id=lambda fx: fx.get("name"),
-        get_query=get_trigger_query,
-        score_run=score_callback,
-        summarize=summarize,
-        runs_per_fixture=args.runs,
-        workers=args.workers,
-        timeout=args.timeout,
-        cwd=cwd,
-        transcript_dir=transcript_dir,
-        summary_label="queries",
-        skill_name=skill_name,
-        eval_path=args.eval,
-        skill_path=skill_path,
-        also_install=also_install,
-    )
-
-    results["skill_name"] = skill_name
-    results["passed"] = sum(
-        1 for r in results["results"] if r["pass"]
-    )
-    results["failed"] = (
-        len(results["results"]) - results["passed"]
-    )
-
-    with open(out_path, "w") as f:
-        json.dump(results, f, indent=2)
-
     try:
-        os.unlink(sock_path)
-    except FileNotFoundError:
-        pass
+        cwd = args.cwd or os.getcwd()
+        queries = json.load(open(args.eval))
 
-    return exit_code
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_dir = transcript_dir_for(out_path)
+
+        score_callback = functools.partial(
+            score_trigger_run, target_skill=skill_name,
+        )
+
+        def summarize(fixtures_with_runs):
+            summary = []
+            for entry in fixtures_with_runs:
+                fx = entry["fixture"]
+                runs = entry["runs"]
+                # score_trigger_run sets pass_ = triggered, so the runner's
+                # canonical pass_ field is the per-run trigger result. Use
+                # it directly rather than re-reading kind_extra.triggered.
+                triggers = sum(1 for r in runs if r["pass_"])
+                rate = triggers / len(runs) if runs else 0
+                did_pass = (
+                    (rate >= 0.5) if fx["should_trigger"]
+                    else (rate < 0.5)
+                )
+                summary.append({
+                    "query": fx["query"],
+                    "should_trigger": fx["should_trigger"],
+                    "triggers": triggers,
+                    "runs": len(runs),
+                    "pass": did_pass,
+                    "run_details": runs,
+                })
+            return summary
+
+        results, exit_code = run_eval(
+            kind="trigger",
+            fixtures=queries,
+            get_fixture_id=lambda fx: fx.get("name"),
+            get_query=get_trigger_query,
+            score_run=score_callback,
+            summarize=summarize,
+            runs_per_fixture=args.runs,
+            workers=args.workers,
+            timeout=args.timeout,
+            cwd=cwd,
+            transcript_dir=transcript_dir,
+            summary_label="queries",
+            skill_name=skill_name,
+            eval_path=args.eval,
+            skill_path=skill_path,
+            also_install=also_install,
+        )
+
+        results["skill_name"] = skill_name
+        results["passed"] = sum(
+            1 for r in results["results"] if r["pass"]
+        )
+        results["failed"] = (
+            len(results["results"]) - results["passed"]
+        )
+
+        with open(out_path, "w") as f:
+            json.dump(results, f, indent=2)
+
+        return exit_code
+    finally:
+        # Always remove the socket file, even on exception paths. The
+        # daemon serve_socket thread is killed at process exit without
+        # running its own finally block.
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":

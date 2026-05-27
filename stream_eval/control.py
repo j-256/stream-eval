@@ -64,8 +64,18 @@ def serve_socket(socket_path):
                 conn, _addr = sock.accept()
             except socket.timeout:
                 continue
-            with conn:
-                _handle_conn(conn)
+            try:
+                with conn:
+                    _handle_conn(conn)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # An abrupt client disconnect (Ctrl+C on the dashboard,
+                # nc timeout, etc.) raises BrokenPipeError or
+                # ConnectionResetError out of sendall/recv. We do NOT
+                # want to take down the listener for the rest of the
+                # eval run -- swallow per-connection errors and accept
+                # the next connection. OSError catches edge cases like
+                # EPIPE on some BSDs.
+                continue
     finally:
         try:
             sock.close()

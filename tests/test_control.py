@@ -15,6 +15,21 @@ from stream_eval.control import (
 )
 
 
+@pytest.fixture(autouse=True)
+def restore_signal_handlers():
+    """install_signal_handlers() mutates process-level signal state.
+    Snapshot SIGUSR1/SIGUSR2 before each test and restore after, so a
+    test's installed handler doesn't leak into subsequent tests or
+    pytest's own machinery."""
+    prior_usr1 = signal.getsignal(signal.SIGUSR1)
+    prior_usr2 = signal.getsignal(signal.SIGUSR2)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGUSR1, prior_usr1)
+        signal.signal(signal.SIGUSR2, prior_usr2)
+
+
 class _StubDispatcher:
     """Stand-in for a real Dispatcher used in control-layer tests."""
     def __init__(self):
@@ -128,3 +143,29 @@ def test_socket_unknown_command(socket_server):
     sock_path, _d = socket_server
     response = _send_socket_command(sock_path, "FROBNICATE")
     assert response.startswith("ERR")
+
+
+def test_socket_survives_abrupt_client_disconnect(socket_server):
+    """An abrupt client disconnect (close before reading the response)
+    must not kill the listener: the next client must still get served.
+
+    Regression for the case where a BrokenPipeError out of sendall
+    inside _handle_conn would propagate up through `with conn` and
+    out of the accept loop, taking down the daemon thread and
+    permanently disabling the control surface.
+    """
+    sock_path, d = socket_server
+
+    # Connect, send a command, close before reading the response. On the
+    # server side this raises BrokenPipeError when sendall tries to
+    # write back to the closed socket.
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sock_path)
+    s.sendall(b"GET workers\n")
+    s.close()
+
+    # Give the server time to discover the broken pipe.
+    time.sleep(0.1)
+
+    # The next client must still get served.
+    assert _send_socket_command(sock_path, "GET workers") == "4"

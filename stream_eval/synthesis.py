@@ -302,6 +302,22 @@ def main(argv=None):
         target=serve_socket, args=(sock_path,), daemon=True
     ).start()
 
+    try:
+        return _run_with_socket(args, skill_name, skill_path, also_install)
+    finally:
+        # Always remove the socket file, even on early-return paths
+        # (e.g., FixtureSchemaError). The daemon serve_socket thread is
+        # killed at process exit without running its own finally block.
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+
+
+def _run_with_socket(args, skill_name, skill_path, also_install):
+    """The body of main() after socket setup. Pulled out so main()'s
+    `finally` cleanup of the socket file is structurally obvious.
+    Returns the exit code."""
     cwd = args.cwd or os.getcwd()
 
     with open(args.eval) as f:
@@ -374,11 +390,6 @@ def main(argv=None):
 
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
-
-    try:
-        os.unlink(sock_path)
-    except FileNotFoundError:
-        pass
 
     return exit_code
 
