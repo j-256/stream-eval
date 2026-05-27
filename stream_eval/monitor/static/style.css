@@ -1,0 +1,60 @@
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+       margin: 1rem; color: #222; }
+header { display: flex; align-items: baseline; gap: 1rem;
+         border-bottom: 1px solid #ddd; padding-bottom: 0.5rem; }
+.session { color: #888; font-size: 0.9rem; }
+.poll-controls { margin-left: auto; }
+.row { margin: 0.75rem 0; padding: 0.5rem;
+       border: 1px solid #eee; border-radius: 4px; }
+.row-header { display: flex; gap: 1rem; align-items: center;
+              margin-bottom: 0.25rem; }
+.skill { font-weight: bold; }
+.kind { color: #888; font-size: 0.9rem; }
+.qpass { margin-left: auto; }
+.bar { display: flex; flex-wrap: wrap; gap: 1px; }
+.cell { width: 12px; height: 18px; border-radius: 1px; }
+.cell.pass { background: #4caf50; }
+.cell.fail { background: #e53935; }
+.cell.pending { background: #ddd; }
+/* Contaminated cells get a yellow outline regardless of pass/fail color
+   so an eval-Sonnet that polluted the worktree mid-run is visible at a
+   glance. The pass verdict on a contaminated run is unaudited. */
+.cell.contaminated { outline: 2px solid #f9a825; outline-offset: -1px; }
+.controls, .global-controls {
+  margin-top: 0.5rem; display: flex; gap: 0.5rem;
+  align-items: center; font-size: 0.9rem;
+}
+.global-controls { margin: 0.5rem 0 1rem 0; padding: 0.5rem;
+                   border: 1px solid #eee; border-radius: 4px; }
+.controls button, .global-controls button {
+  padding: 0.2rem 0.5rem; cursor: pointer;
+}
+.workers-current { color: #666; }
+.workers-count { font-weight: bold; color: #222; }
+table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+th, td { text-align: left; padding: 0.25rem 0.5rem;
+         border-bottom: 1px solid #eee; }
+tr.fail { background: #fff5f5; }
+.empty { color: #888; font-style: italic; }
+.query { font-family: ui-monospace, monospace; font-size: 0.85rem;
+         color: #444; }
+
+/* Dark mode: respects the OS / browser preference. Cells keep their
+   semantic colors (green/red/gray/yellow outline) but darkened
+   slightly; backgrounds and text invert. */
+@media (prefers-color-scheme: dark) {
+  body { background: #1a1a1a; color: #e0e0e0; }
+  header { border-bottom-color: #333; }
+  .session, .kind, .workers-current, .empty, .query { color: #999; }
+  .row, .global-controls { border-color: #333; background: #232323; }
+  .skill, .workers-count { color: #f0f0f0; }
+  .cell.pass { background: #2e7d32; }
+  .cell.fail { background: #c62828; }
+  .cell.pending { background: #444; }
+  .cell.contaminated { outline-color: #f9a825; }
+  th, td { border-bottom-color: #333; }
+  tr.fail { background: #3a1f1f; }
+  button { background: #2a2a2a; color: #e0e0e0;
+           border: 1px solid #555; border-radius: 3px; }
+  button:hover { background: #333; }
+}

@@ -1,0 +1,30 @@
+<section class="global-controls">
+  <span class="workers-current">workers: <span class="workers-count">{{ target_workers if target_workers is not none else '?' }}</span></span>
+  <form method="post" action="{{ url_for('workers_decrement') }}" style="display:inline">
+    <button type="submit">-1</button>
+  </form>
+  <form method="post" action="{{ url_for('workers_increment') }}" style="display:inline">
+    <button type="submit">+1</button>
+  </form>
+  <form method="post" action="{{ url_for('workers_pause') }}" style="display:inline">
+    <button type="submit">pause</button>
+  </form>
+  <form method="post" action="{{ url_for('workers_resume') }}" style="display:inline">
+    <button type="submit">resume</button>
+  </form>
+</section>
+<section class="rows" data-active="{{ 'true' if active_workers else 'false' }}">
+  {% for row in state.rows %}
+    {% include "partials/progress_bar.html" %}
+  {% else %}
+    <p class="empty">No active or recent runs detected.</p>
+  {% endfor %}
+</section>
+<section class="workers">
+  <h2>Active workers</h2>
+  {% include "partials/workers_table.html" %}
+</section>
+<section class="recent">
+  <h2>Recent completions</h2>
+  {% include "partials/recent_table.html" %}
+</section>

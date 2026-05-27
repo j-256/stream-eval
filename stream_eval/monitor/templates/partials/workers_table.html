@@ -1,0 +1,19 @@
+{% if active_workers %}
+  <table>
+    <thead><tr>
+      <th>pid</th><th>kind</th><th>skill</th><th>started</th>
+    </tr></thead>
+    <tbody>
+      {% for w in active_workers %}
+      <tr>
+        <td>{{ w.pid }}</td>
+        <td>{{ w.kind }}</td>
+        <td>{{ w.skill or '-' }}</td>
+        <td>{{ w.started_at_human }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <p class="empty">No active workers.</p>
+{% endif %}

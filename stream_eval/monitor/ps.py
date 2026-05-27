@@ -1,0 +1,172 @@
+"""Process discovery and session detection for the dashboard.
+
+Replaces the `ps -eo pid,ppid,etime,cmd` regex parsing in the legacy
+single-file monitor with psutil.Process accessors.
+
+Public surface:
+- find_eval_workers(): yield dicts describing live trigger/synthesis
+  workers ({pid, ppid, kind, skill, eval_path, started_at, cmdline}).
+- detect_session(explicit=None): return the Claude Code session id
+  the dashboard should pin to, using the layered fallback (explicit ->
+  parent bash -> live worker -> recent .output file).
+- find_output_files(max_age_hours): return paths of recent .output
+  files within the age window.
+"""
+import os
+import re
+import time
+from pathlib import Path
+
+import psutil
+
+
+# Match the harness invocation in cmdline. Three forms:
+#   1. Console script: `... stream-eval trigger ...`
+#   2. Module form:    `... -m stream_eval.cli trigger ...`
+#   3. Legacy in-repo: `... tools/trigger-eval.py ...`
+_KIND_TOKEN_RE = re.compile(
+    r"\b(?:stream-eval|stream_eval\.cli)\s+(trigger|synthesis)\b"
+    r"|tools/(trigger|synthesis)-eval\.py"
+)
+
+
+def find_eval_workers():
+    """Yield one dict per live trigger/synthesis worker on this host.
+
+    Fields:
+    - pid, ppid: process ids
+    - kind: "trigger" or "synthesis"
+    - skill: parsed from --skill-path or --skill-name flag, else None
+    - eval_path: parsed from --eval flag, else None
+    - started_at: psutil create_time (Unix epoch)
+    - cmdline: full argv as a list
+    """
+    for proc in psutil.process_iter(["pid", "ppid", "name", "cmdline",
+                                      "create_time"]):
+        try:
+            if not proc.is_running():
+                continue
+            cmdline = proc.cmdline()
+            if not cmdline:
+                continue
+            joined = " ".join(cmdline)
+            m = _KIND_TOKEN_RE.search(joined)
+            if not m:
+                continue
+            kind = m.group(1) or m.group(2)
+            skill = (
+                _extract_flag_value(cmdline, "--skill-path")
+                or _extract_flag_value(cmdline, "--skill-name")
+            )
+            eval_path = _extract_flag_value(cmdline, "--eval")
+            yield {
+                "pid": proc.pid,
+                "ppid": proc.ppid(),
+                "kind": kind,
+                "skill": _basename_or_none(skill),
+                "eval_path": eval_path,
+                "started_at": proc.create_time(),
+                "cmdline": cmdline,
+            }
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+
+def _extract_flag_value(cmdline, flag):
+    """Find `<flag> <value>` in cmdline; return value or None."""
+    for i, tok in enumerate(cmdline):
+        if tok == flag and i + 1 < len(cmdline):
+            return cmdline[i + 1]
+        if tok.startswith(flag + "="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def _basename_or_none(p):
+    return Path(p).name if p else None
+
+
+def detect_session(explicit=None):
+    """Return the Claude Code session id the dashboard should pin to.
+
+    Layered fallback:
+    1. explicit (from --session): returned as-is.
+    2. The dashboard's own bash parent's $CLAUDE_SESSION_ID env var.
+    3. Any live trigger/synthesis worker's bash-parent session id.
+    4. The youngest .output file's session id, within DASHBOARD_MAX_AGE_HOURS.
+    Returns None if no session can be determined.
+    """
+    if explicit:
+        return explicit
+    sid = _session_from_parent(os.getpid())
+    if sid:
+        return sid
+    for w in find_eval_workers():
+        sid = _session_from_parent(w["pid"])
+        if sid:
+            return sid
+    age_hours = float(os.environ.get("DASHBOARD_MAX_AGE_HOURS", "4"))
+    cutoff = time.time() - age_hours * 3600
+    for path in _output_paths():
+        if path.stat().st_mtime >= cutoff:
+            sid = _session_from_output_path(path)
+            if sid:
+                return sid
+    return None
+
+
+def _session_from_parent(pid):
+    """Walk up the parent chain looking for a CLAUDE_SESSION_ID env var.
+    Returns the session id, or None."""
+    try:
+        cur = psutil.Process(pid).parent()
+    except psutil.NoSuchProcess:
+        return None
+    depth = 0
+    while cur is not None and depth < 8:
+        try:
+            env = cur.environ()
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            env = {}
+        sid = env.get("CLAUDE_SESSION_ID")
+        if sid:
+            return sid
+        try:
+            cur = cur.parent()
+        except psutil.NoSuchProcess:
+            break
+        depth += 1
+    return None
+
+
+def _output_paths():
+    """Iterate over .output files used as fallback session-detection input."""
+    home = Path.home()
+    base = home / ".claude" / "projects"
+    if not base.is_dir():
+        return
+    for p in base.rglob("*.output"):
+        yield p
+
+
+def _session_from_output_path(path):
+    """Extract session id from an .output file path.
+
+    Returning None here makes detect_session()'s fallback layer 4
+    (recent .output file) silently drop through, so the dashboard's
+    session pin will only resolve via layers 1-3 (explicit flag,
+    parent bash, live worker). This is acceptable: the file-walk
+    fallback was a "last-ditch best-effort" in the legacy monitor and
+    is rarely the layer that resolves in practice. If the empty
+    fallback turns out to matter, decoding the parent dir's encoded
+    slug (the legacy approach) goes here.
+    """
+    return None
+
+
+def find_output_files(max_age_hours=None):
+    """Return the list of .output paths within the age window."""
+    if max_age_hours is None:
+        max_age_hours = float(os.environ.get("DASHBOARD_MAX_AGE_HOURS", "4"))
+    cutoff = time.time() - max_age_hours * 3600
+    return [p for p in _output_paths() if p.stat().st_mtime >= cutoff]

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>stream-eval dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>stream-eval</h1>
+    {% if session %}<div class="session">session: {{ session }}</div>{% endif %}
+    <div class="poll-controls">
+      <button id="refresh-now" type="button">refresh now</button>
+      <span id="poll-status">polling</span>
+    </div>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    /* Layered polling: 5s when active runs exist, 30s when idle, pause
+       after ~3 min of no change. Click "refresh now" to resume. */
+    const POLL_ACTIVE_MS = 5000;
+    const POLL_IDLE_MS = 30000;
+    const PAUSE_AFTER_MS = 3 * 60 * 1000;
+    let lastChange = Date.now();
+    let lastHtml = "";
+    let timer = null;
+
+    async function refresh() {
+      try {
+        const res = await fetch(window.location.pathname + "?_partial=1");
+        const html = await res.text();
+        if (html !== lastHtml) {
+          document.querySelector("main").innerHTML = html;
+          lastHtml = html;
+          lastChange = Date.now();
+        }
+        const isActive = document.querySelector("[data-active='true']") !== null;
+        const isPaused = (Date.now() - lastChange) > PAUSE_AFTER_MS;
+        document.getElementById("poll-status").textContent =
+          isPaused ? "paused (no change)"
+                   : isActive ? "polling (5s)" : "polling (30s)";
+        if (!isPaused) {
+          timer = setTimeout(refresh, isActive ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+        }
+      } catch (e) {
+        document.getElementById("poll-status").textContent = "error: " + e;
+        timer = setTimeout(refresh, POLL_IDLE_MS);
+      }
+    }
+
+    document.getElementById("refresh-now").addEventListener("click", () => {
+      lastChange = Date.now();
+      if (timer) clearTimeout(timer);
+      refresh();
+    });
+
+    /* Intercept worker-control form submits (.row .controls form for
+       per-row controls and .global-controls form for the always-visible
+       top-of-dashboard buttons). POST to the form's action, replace
+       <main> with the response body, and restart the polling cycle. */
+    document.addEventListener("submit", async (ev) => {
+      const form = ev.target;
+      if (!form.matches(".row .controls form, .global-controls form")) return;
+      ev.preventDefault();
+      try {
+        const res = await fetch(form.action, { method: "POST" });
+        const html = await res.text();
+        document.querySelector("main").innerHTML = html;
+        lastHtml = html;
+        lastChange = Date.now();
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(refresh, POLL_ACTIVE_MS);
+      } catch (e) {
+        document.getElementById("poll-status").textContent =
+          "control error: " + e;
+      }
+    });
+
+    refresh();
+  </script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+{% if recent %}
+  <table>
+    <thead><tr>
+      <th>fixture</th><th>run</th><th>pass</th><th>elapsed</th><th>retries</th><th>query</th>
+    </tr></thead>
+    <tbody>
+      {% for r in recent %}
+      <tr class="{% if r.pass_ %}pass{% else %}fail{% endif %}">
+        <td>{{ r.fixture_id }}</td>
+        <td>{{ r.run }}</td>
+        <td>{{ 'pass' if r.pass_ else 'fail' }}</td>
+        <td>{{ '%.1fs' % r.elapsed }}</td>
+        <td>{{ r.retries }}</td>
+        <td class="query">{{ r.query[:80] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <p class="empty">No recent completions.</p>
+{% endif %}

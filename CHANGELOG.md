@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Flask + Jinja2 + psutil dashboard, decomposed into a monitor/ subpackage:
+  monitor/app.py (Flask routes), monitor/state.py (DashboardState),
+  monitor/ps.py (psutil-based discovery + session detection),
+  monitor/parsing.py (stderr-line and banner regexes), monitor/socket_client.py
+  (talks to harness over Unix socket), monitor/templates/ (Jinja2),
+  monitor/static/ (CSS).
+- Worker-control routes: POST /workers/+1, /workers/-1, /workers/pause,
+  /workers/resume.
 - `harness_version` and `harness_version_kind` fields in every results.json envelope, derived from .git/HEAD or stream_eval.__version__.
 - Initial repository scaffolding.
 - Imported eval harness from claude-code-skills/tools/.
@@ -24,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `target_workers` from any terminal (`kill -USR1 <pid>`).
 - Unix-socket control listener at `/tmp/stream-eval-<pid>.sock`
   (line protocol: GET/SET workers, PAUSE/RESUME, GET state, QUIT).
+
+### Removed
+- Single-file monitor.py (replaced by monitor/ subpackage).
+- Legacy test_monitor.py (replaced by per-submodule tests).
 
 ### Changed
 - Renamed `DSC_EVAL_MODEL` -> `STREAM_EVAL_MODEL` and `DSC_EVAL_PROFILE` -> `STREAM_EVAL_PROFILE`.
