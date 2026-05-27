@@ -322,6 +322,8 @@ The harnesses read configuration from `.env` at the repo root (gitignored) via `
 | `STREAM_EVAL_PROFILE` | `isolated` | Toolbelt profile (`isolated`, `restricted`, or `inherit`) for spawned `claude -p` subprocesses. (Renamed from `DSC_EVAL_PROFILE`; previous `default` profile renamed to `inherit`.) |
 | `STREAM_EVAL_OUTPUT_LIMIT` | `100` | Maximum `.output` files the dashboard parses on each refresh, ranked by mtime descending. Bump it if a slow active eval whose mtime falls outside the top-N starts disappearing mid-run. |
 | `STREAM_EVAL_PER_SKILL_CAP` | `5` | Per-(skill, kind) row cap. Active rows always bypass the cap; older completed/aborted rows are hidden once the cap is reached. Set to `0` to disable. |
+| `STREAM_EVAL_POLL_ACTIVE_MS` | `5000` | Default dashboard poll interval when active runs exist. Operators can override per-tab via the input at the top-right; the override persists in localStorage. |
+| `STREAM_EVAL_POLL_IDLE_MS` | `30000` | Default dashboard poll interval when no active runs. Same per-tab override mechanism. |
 
 Existing environment values win over `.env`; `.env` only fills gaps. No-op if `.env` is missing.
 

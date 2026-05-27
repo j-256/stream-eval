@@ -110,6 +110,21 @@ def test_workers_route_rejects_non_integer_pid(client):
     assert rv.status_code == 404
 
 
+def test_dashboard_renders_poll_inputs_with_env_defaults(client, monkeypatch):
+    """Top-right poll-interval inputs read their defaults from env
+    vars. Per-tab overrides come from localStorage on the client side
+    (not testable from Python), but the server must seed the inputs
+    with the env values."""
+    monkeypatch.setenv("STREAM_EVAL_POLL_ACTIVE_MS", "2000")
+    monkeypatch.setenv("STREAM_EVAL_POLL_IDLE_MS", "15000")
+    rv = client.get("/")
+    body = rv.data.decode("utf-8")
+    assert 'id="poll-active-input"' in body
+    assert 'value="2000"' in body
+    assert 'id="poll-idle-input"' in body
+    assert 'value="15000"' in body
+
+
 def test_dashboard_renders_dispatcher_state_badge(client):
     """Active rows must show running / paused badges so a successful
     PAUSE click produces a visible UI change. Without this, pause

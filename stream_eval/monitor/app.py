@@ -13,6 +13,7 @@ Public surface:
 - print_summary(session): one-shot CLI summary (replaces the old
   no-arg `eval-monitor.py`).
 """
+import os
 import time
 import webbrowser
 
@@ -50,6 +51,8 @@ def create_app(session=None):
         return {
             "state": state,
             "session": _resolve_session(),
+            "poll_active_ms": _poll_default("STREAM_EVAL_POLL_ACTIVE_MS", 5000),
+            "poll_idle_ms": _poll_default("STREAM_EVAL_POLL_IDLE_MS", 30000),
         }
 
     @app.route("/", methods=["GET"])
@@ -154,6 +157,19 @@ def _recent_for_row(row):
             "contaminated": cell.contaminated,
         })
     return out
+
+
+def _poll_default(env_var, fallback):
+    """Read an integer ms from env, falling back to a hardcoded
+    default. The frontend uses this as the seed value for its
+    in-page tuning inputs; per-tab overrides come from localStorage."""
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return fallback
+    try:
+        return max(100, int(raw))  # 100ms floor: don't let env spam the harness
+    except ValueError:
+        return fallback
 
 
 def _humanize(seconds):
