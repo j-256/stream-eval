@@ -27,6 +27,14 @@ header { display: flex; align-items: baseline; gap: 1rem;
 .cell.pass { background: #4caf50; }
 .cell.fail { background: #e53935; }
 .cell.pending { background: #ddd; }
+.cell.in-flight { background: #586069;
+                  animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.in-flight-stat { color: #555; font-size: 0.85rem;
+                  font-family: ui-monospace, monospace; }
 /* Contaminated cells get a yellow outline regardless of pass/fail color
    so an eval-Sonnet that polluted the worktree mid-run is visible at a
    glance. The pass verdict on a contaminated run is unaudited. */
@@ -60,6 +68,8 @@ tr.fail { background: #fff5f5; }
   .cell.pass { background: #2e7d32; }
   .cell.fail { background: #c62828; }
   .cell.pending { background: #444; }
+  .cell.in-flight { background: #6c757d; }
+  .in-flight-stat { color: #aaa; }
   .cell.contaminated { outline-color: #f9a825; }
   th, td { border-bottom-color: #333; }
   tr.fail { background: #3a1f1f; }

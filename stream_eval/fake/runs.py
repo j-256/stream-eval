@@ -21,6 +21,7 @@ the dashboard at the temp dir, e.g. by patching ps._output_paths
 in tests, or by symlinking the temp dir under ~/.claude/projects
 for interactive smoke testing (the __main__ entry handles this).
 """
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -34,11 +35,13 @@ from stream_eval.runner import (
 
 
 # Fake harness pids start well above typical real pids on macOS/Linux
-# so they're unlikely to collide with anything actually running. The
-# fake never spawns real processes, so these pids are ledger entries
-# only -- the dashboard's os.kill liveness probe will return False
-# unless we explicitly mark them alive (see is_pid_alive helper below).
-_FAKE_PID_BASE = 90000
+# (max_pid is 99999 on macOS, 4194304 on Linux) and are randomized to
+# avoid collisions with concurrent fake invocations. The fake never
+# spawns real processes, so these pids are ledger entries only -- the
+# dashboard's os.kill liveness probe will return False unless we
+# explicitly mark them alive (see is_pid_alive helper).
+_FAKE_PID_FLOOR = 200000
+_FAKE_PID_CEILING = 999999
 
 
 class FakeState:
@@ -113,9 +116,14 @@ class _Builder:
     progress/finish lines to."""
 
     def __init__(self, base_dir):
+        import random
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self._next_pid = _FAKE_PID_BASE
+        # Pick a random starting pid so two concurrent `stream-eval fake`
+        # invocations don't both allocate from the same base and end up
+        # with overlapping pids (which would cross-contaminate sidecars
+        # and confuse the dashboard's per-row routing).
+        self._next_pid = random.randint(_FAKE_PID_FLOOR, _FAKE_PID_CEILING - 100)
         self.sockets = []
         self.fake_pids = set()
         self.output_paths = []
@@ -128,7 +136,8 @@ class _Builder:
 
     def start_eval(self, *, skill, kind, total_fixtures, runs,
                    workers=4, eval_path=None, pid=None,
-                   live_socket=False, file_name=None):
+                   live_socket=False, file_name=None, in_flight=0,
+                   in_flight_retries_per_pid=0):
         """Open an .output file with a startup banner. Returns an
         _EvalHandle the caller fills with progress lines and an
         optional finish banner.
@@ -137,6 +146,13 @@ class _Builder:
         /tmp/stream-eval-<pid>.sock so the dashboard's per-row
         controls have something to talk to. Workers/state are
         seeded from the `workers` arg.
+
+        If in_flight > 0, write a sidecar .workers.json describing
+        that many fake claude pids -- the dashboard's psutil walk
+        finds nothing (these pids don't actually exist) and falls
+        back to the sidecar, which lets fake scenarios render the
+        pulsing in-flight cells and the retries-in-flight counter
+        without spinning up real subprocesses.
         """
         if pid is None:
             pid = self.alloc_pid()
@@ -158,10 +174,44 @@ class _Builder:
                 initial_workers=workers,
             )
             self.sockets.append(sock)
+        if in_flight > 0:
+            self._write_workers_sidecar(
+                pid=pid, count=in_flight,
+                retries_per_pid=in_flight_retries_per_pid,
+                file_name=file_name,
+            )
         return _EvalHandle(
             out_path=out_path, pid=pid, skill=skill, kind=kind,
             total_fixtures=total_fixtures, runs=runs,
         )
+
+    def _write_workers_sidecar(self, *, pid, count, retries_per_pid,
+                                file_name):
+        """Write a <file_name>.workers.json sidecar that the dashboard's
+        find_claude_workers_for fallback path consumes."""
+        import time
+        sidecar = self.base_dir / f"{file_name}.workers.json"
+        now = time.time()
+        workers = []
+        for i in range(count):
+            fake_pid = pid * 100 + i + 1
+            workers.append({
+                "pid": fake_pid,
+                "started_at": now - (i * 5 + 5),
+                "cmdline": [
+                    "claude", "-p", "--output-format", "stream-json",
+                    "fake fixture query",
+                ],
+                "fixture_id": f"q{i}",
+                "run": 1,
+                "transcript_path": None,
+                "retries": retries_per_pid,
+                "latest_attempt": retries_per_pid,
+                "max_retries_field": 10 if retries_per_pid else 0,
+                "last_error": "rate_limit" if retries_per_pid else None,
+            })
+        with sidecar.open("w") as f:
+            json.dump({"harness_pid": pid, "workers": workers}, f)
 
 
 class _EvalHandle:
@@ -214,6 +264,7 @@ def _scenario_active_clean(b):
     h = b.start_eval(
         skill="dsc-scrape", kind="trigger",
         total_fixtures=10, runs=1, live_socket=True,
+        in_flight=2,
     )
     for i in range(3):
         h.complete_run(fixture_id=f"q{i}", run=1, pass_=True,
@@ -224,6 +275,7 @@ def _scenario_active_with_failures(b):
     h = b.start_eval(
         skill="dsc-endpoint-help", kind="trigger",
         total_fixtures=10, runs=1, live_socket=True,
+        in_flight=3, in_flight_retries_per_pid=2,
     )
     h.complete_run(fixture_id="q0", run=1, pass_=True)
     h.complete_run(fixture_id="q1", run=1, pass_=False, retries=2,
@@ -237,6 +289,7 @@ def _scenario_active_with_contamination(b):
     h = b.start_eval(
         skill="dsc-scenario", kind="synthesis",
         total_fixtures=5, runs=2, live_socket=True,
+        in_flight=1,
     )
     h.complete_run(fixture_id="q0", run=1, pass_=True, contaminated=True,
                    query="contaminated but technically passed")
@@ -252,12 +305,14 @@ def _scenario_concurrent(b):
     h1 = b.start_eval(
         skill="dsc-scrape", kind="trigger",
         total_fixtures=8, runs=1, live_socket=True,
+        in_flight=2,
     )
     for i in range(4):
         h1.complete_run(fixture_id=f"q{i}", run=1, pass_=True)
     h2 = b.start_eval(
         skill="dsc-scenario", kind="synthesis",
         total_fixtures=4, runs=2, live_socket=True,
+        in_flight=3, in_flight_retries_per_pid=1,
     )
     for i in range(2):
         h2.complete_run(fixture_id=f"f{i}", run=1, pass_=True)
@@ -290,7 +345,10 @@ def _scenario_aborted_no_finish_banner(b):
     """Startup banner present, no progress for a while, no finish
     banner -- the runner was killed (Ctrl-C, OOM) before it could
     stamp the verdict. Status falls through to pid-liveness; if the
-    pid isn't alive (FakeState's default), status='aborted'."""
+    pid isn't alive (FakeState's default), status='aborted'.
+
+    No in_flight here: an aborted harness has no live children, even
+    in the live-but-no-finish-banner case where status='active'."""
     h = b.start_eval(
         skill="dsc-triage-fake", kind="trigger",
         total_fixtures=10, runs=1, live_socket=False,

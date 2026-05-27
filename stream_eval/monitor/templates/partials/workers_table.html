@@ -1,13 +1,25 @@
 {% if active_workers %}
   <table>
     <thead><tr>
-      <th>claude pid</th><th>started</th>
+      <th>claude pid</th><th>fixture</th><th>run</th><th>started</th>
+      <th>retries</th><th>attempt</th><th>last error</th>
     </tr></thead>
     <tbody>
       {% for w in active_workers %}
       <tr>
         <td>{{ w.pid }}</td>
+        <td>{{ w.fixture_id or '(starting)' }}</td>
+        <td>{{ w.run if w.run is not none else '-' }}</td>
         <td>{{ w.started_at_human }}</td>
+        <td>{{ w.retries or 0 }}</td>
+        <td>
+          {% if w.latest_attempt %}
+            {{ w.latest_attempt }}/{{ w.max_retries_field }}
+          {% else %}
+            -
+          {% endif %}
+        </td>
+        <td>{{ w.last_error or '-' }}</td>
       </tr>
       {% endfor %}
     </tbody>

@@ -12,8 +12,10 @@ Public surface:
 - find_output_files(limit): return the youngest .output paths
   (default last 30 by mtime).
 """
+import json
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import psutil
@@ -71,6 +73,10 @@ def find_eval_workers():
             continue
 
 
+_TRANSCRIPT_PATH_RE = re.compile(r"(\S+/transcripts/[^/]+/[^/]+\.jsonl)\b")
+_TRANSCRIPT_FILENAME_RE = re.compile(r"^(?P<fixture_id>.+)-(?P<run>\d+)\.jsonl$")
+
+
 def find_claude_workers_for(harness_pid):
     """Yield one dict per live `claude -p` child of `harness_pid`.
 
@@ -79,19 +85,47 @@ def find_claude_workers_for(harness_pid):
     harness's row so the operator sees what's actually executing
     versus just the parent's existence.
 
+    Each yielded dict carries enough to identify which fixture the
+    subprocess is running and how it's faring -- the legacy monitor
+    used these for the "X of N in-flight, Y retries" header and the
+    pulsing in-flight cells in the segmented bar.
+
     Fields per child:
     - pid: claude subprocess pid
     - started_at: psutil create_time (Unix epoch)
     - cmdline: full argv
+    - fixture_id: parsed from the transcript filename, or None
+    - run: parsed from the transcript filename, or None
+    - transcript_path: best-guess path to the worker's open
+      transcripts/<out-stem>/<fixture>-<run>.jsonl, or None
+    - retries: count of api_retry events seen so far in the
+      transcript (0 if no transcript yet -- subprocess just started)
+    - latest_attempt: most-recent api_retry attempt counter
+    - max_retries_field: max_retries from the latest api_retry event
+    - last_error: error string from the latest api_retry event
+
+    Trigger-eval workers don't write to transcripts/ (they use a
+    tempfile); for those, fixture_id / run / transcript_path will be
+    None even though pid + started_at are correct. That's fine -- the
+    dashboard renders "(starting)" for the fixture_id column.
+
+    Sidecar fallback for development: stream_eval.fake writes pre-baked
+    worker dicts to a sidecar JSON file when its scenarios include
+    in-flight cells. If psutil yields no live children for harness_pid
+    (the common case for fake harnesses, which are ledger-only) AND a
+    sidecar exists at any .workers.json under ~/.claude/projects/
+    matching this pid, those dicts are yielded. Real harnesses have
+    no sidecars and never hit this path.
     """
+    real_yielded = False
     try:
         parent = psutil.Process(harness_pid)
+        try:
+            children = parent.children(recursive=False)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            children = []
     except psutil.NoSuchProcess:
-        return
-    try:
-        children = parent.children(recursive=False)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return
+        children = []
     for child in children:
         try:
             if not child.is_running():
@@ -107,13 +141,148 @@ def find_claude_workers_for(harness_pid):
             # which it shells out to often during worktree management.
             if Path(cmd[0]).name != "claude":
                 continue
+            transcript = _resolve_transcript(child)
+            stats = _transcript_stats(transcript) if transcript else _empty_stats()
+            fixture_id, run = _parse_transcript_filename(transcript)
+            real_yielded = True
             yield {
                 "pid": child.pid,
                 "started_at": child.create_time(),
                 "cmdline": cmd,
+                "fixture_id": fixture_id,
+                "run": run,
+                "transcript_path": transcript,
+                "retries": stats["total_retries"],
+                "latest_attempt": stats["latest_attempt"],
+                "max_retries_field": stats["max_retries_field"],
+                "last_error": stats["last_error"],
             }
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
+    if not real_yielded:
+        yield from _yield_fake_workers_for(harness_pid)
+
+
+def _yield_fake_workers_for(harness_pid):
+    """Read .workers.json sidecars under ~/.claude/projects/ that
+    declare in-flight workers for this harness pid. Used by
+    stream_eval.fake to inject simulated workers without needing real
+    subprocesses; real harnesses don't write these files."""
+    home = Path.home()
+    base = home / ".claude" / "projects"
+    if not base.is_dir():
+        return
+    for path in base.rglob("*.workers.json"):
+        try:
+            with path.open() as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("harness_pid") != harness_pid:
+            continue
+        for w in data.get("workers", []):
+            yield w
+
+
+def _resolve_transcript(proc):
+    """Best-effort: return a path matching */transcripts/<stem>/<f>-<r>.jsonl
+    that the process holds open, or None. Tries psutil's open_files()
+    first (fast, no shell-out), falls back to lsof on platforms where
+    psutil declines to enumerate (macOS sometimes returns []).
+    """
+    try:
+        files = proc.open_files()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+    for f in files:
+        m = _TRANSCRIPT_PATH_RE.search(f.path)
+        if m:
+            return m.group(1)
+    # psutil.open_files is empty on macOS for some claude processes;
+    # fall back to lsof, which the legacy monitor relied on.
+    try:
+        out = subprocess.run(
+            ["lsof", "-p", str(proc.pid)],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode not in (0, 1):
+        # lsof returns 1 when some fd lookups failed but at least one
+        # line was emitted; that's still useful.
+        return None
+    candidates = []
+    for line in out.stdout.splitlines():
+        m = _TRANSCRIPT_PATH_RE.search(line)
+        if m:
+            candidates.append(m.group(1))
+    if not candidates:
+        return None
+    # Defensive: if the process holds two transcripts open, prefer
+    # the youngest (mtime) -- the legacy monitor's heuristic.
+    def _mtime(p):
+        try:
+            return Path(p).stat().st_mtime
+        except OSError:
+            return 0.0
+    candidates.sort(key=_mtime, reverse=True)
+    return candidates[0]
+
+
+def _parse_transcript_filename(transcript_path):
+    """Return (fixture_id, run) from a path's basename, or (None, None)."""
+    if not transcript_path:
+        return (None, None)
+    m = _TRANSCRIPT_FILENAME_RE.match(Path(transcript_path).name)
+    if not m:
+        return (None, None)
+    return (m.group("fixture_id"), int(m.group("run")))
+
+
+def _transcript_stats(path):
+    """Count api_retry events + extract the most recent attempt info.
+
+    Returns a dict with total_retries, latest_attempt, max_retries_field,
+    last_error. All zeros / None when the path is missing or unreadable
+    -- the dashboard tolerates this gracefully (renders the cell as
+    in-flight with no retry annotations)."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return _empty_stats()
+    total = 0
+    latest_attempt = 0
+    max_retries = 0
+    last_error = None
+    for line in text.splitlines():
+        if '"api_retry"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") == "system" and d.get("subtype") == "api_retry":
+            total += 1
+            latest_attempt = d.get("attempt", 0)
+            mr = d.get("max_retries", 0)
+            if mr > max_retries:
+                max_retries = mr
+            last_error = d.get("error")
+    return {
+        "total_retries": total,
+        "latest_attempt": latest_attempt,
+        "max_retries_field": max_retries,
+        "last_error": last_error,
+    }
+
+
+def _empty_stats():
+    return {
+        "total_retries": 0,
+        "latest_attempt": 0,
+        "max_retries_field": 0,
+        "last_error": None,
+    }
 
 
 def _extract_flag_value(cmdline, flag):

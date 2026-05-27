@@ -147,6 +147,36 @@ def test_find_claude_workers_for_accepts_absolute_path_to_claude():
     assert workers[0]["pid"] == 301
 
 
+def test_find_claude_workers_for_includes_retry_fields():
+    """Each yielded worker dict carries retries/latest_attempt/
+    max_retries_field/last_error so the dashboard can show the
+    'X in flight, Y retries' header and the legacy attempt color."""
+    from stream_eval.monitor.ps import find_claude_workers_for
+
+    parent = _fake_proc(100, 1, "python3", ["python3", "-m", "x"], 1.0)
+    claude = _fake_proc(
+        201, 100, "claude",
+        ["claude", "-p"],
+        2.0,
+    )
+    parent.children = mock.MagicMock(return_value=[claude])
+    # Empty open_files() -> falls through to lsof, which we mock to
+    # return no transcript path.
+    claude.open_files = mock.MagicMock(return_value=[])
+
+    with mock.patch("stream_eval.monitor.ps.psutil.Process",
+                    return_value=parent), \
+         mock.patch("stream_eval.monitor.ps.subprocess.run") as mock_run:
+        mock_run.return_value = mock.MagicMock(returncode=0, stdout="")
+        workers = list(find_claude_workers_for(100))
+    assert len(workers) == 1
+    w = workers[0]
+    assert w["retries"] == 0
+    assert w["latest_attempt"] == 0
+    assert w["fixture_id"] is None
+    assert w["transcript_path"] is None
+
+
 def test_find_claude_workers_for_returns_empty_when_parent_missing():
     """A dead/never-existed harness pid yields nothing rather than
     raising. The dashboard polls into this every refresh and must
@@ -159,3 +189,65 @@ def test_find_claude_workers_for_returns_empty_when_parent_missing():
                     side_effect=psutil.NoSuchProcess(pid=999)):
         workers = list(find_claude_workers_for(999))
     assert workers == []
+
+
+def test_transcript_stats_counts_api_retries(tmp_path):
+    """The retry counter underpins the dashboard's 'Y retries in
+    flight' header. Each api_retry event in the transcript JSONL
+    increments total_retries; the most-recent event sets
+    latest_attempt and last_error."""
+    from stream_eval.monitor.ps import _transcript_stats
+
+    tx = tmp_path / "q0-1.jsonl"
+    tx.write_text(
+        '{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"error":"rate_limit"}\n'
+        '{"type":"assistant","message":{"content":"working"}}\n'
+        '{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"error":"server_error"}\n'
+        '{"type":"system","subtype":"api_retry","attempt":3,"max_retries":10,"error":"rate_limit"}\n'
+    )
+    stats = _transcript_stats(str(tx))
+    assert stats["total_retries"] == 3
+    assert stats["latest_attempt"] == 3
+    assert stats["max_retries_field"] == 10
+    assert stats["last_error"] == "rate_limit"
+
+
+def test_transcript_stats_handles_missing_file():
+    """A worker that just spawned hasn't opened its transcript yet.
+    The stats lookup must return zeros, not raise."""
+    from stream_eval.monitor.ps import _transcript_stats
+
+    stats = _transcript_stats("/tmp/does-not-exist.jsonl")
+    assert stats["total_retries"] == 0
+    assert stats["last_error"] is None
+
+
+def test_find_claude_workers_for_falls_back_to_sidecar_when_no_real_children(tmp_path, monkeypatch):
+    """The fake submodule writes a sidecar JSON when scenarios declare
+    in-flight workers. find_claude_workers_for falls back to that
+    sidecar when psutil yields no real children, so fake harnesses
+    can render the in-flight cells without spinning up subprocesses."""
+    from stream_eval.monitor.ps import find_claude_workers_for
+
+    fake_projects = tmp_path / ".claude" / "projects" / "stream-eval-fake"
+    fake_projects.mkdir(parents=True)
+    sidecar = fake_projects / "x.workers.json"
+    sidecar.write_text('{"harness_pid": 90001, "workers": ['
+                        '{"pid": 9000101, "started_at": 1.0, '
+                        '"cmdline": ["claude"], '
+                        '"fixture_id": "q0", "run": 1, '
+                        '"transcript_path": null, "retries": 2, '
+                        '"latest_attempt": 2, "max_retries_field": 10, '
+                        '"last_error": "rate_limit"}'
+                        ']}')
+    monkeypatch.setattr("stream_eval.monitor.ps.Path.home",
+                        lambda: tmp_path)
+    # Pretend the harness pid exists but has no children.
+    parent = _fake_proc(90001, 1, "python3", ["python3"], 0.0)
+    parent.children = mock.MagicMock(return_value=[])
+    with mock.patch("stream_eval.monitor.ps.psutil.Process",
+                    return_value=parent):
+        workers = list(find_claude_workers_for(90001))
+    assert len(workers) == 1
+    assert workers[0]["fixture_id"] == "q0"
+    assert workers[0]["retries"] == 2

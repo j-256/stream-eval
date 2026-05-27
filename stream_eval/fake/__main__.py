@@ -72,6 +72,7 @@ def main(argv=None):
         # projects tree directly is the only way to be visible.
         projects = Path.home() / ".claude" / "projects"
         projects.mkdir(parents=True, exist_ok=True)
+        _cleanup_orphaned_fake_dirs(projects)
         base_dir = str(projects / f"stream-eval-fake-{uuid.uuid4().hex[:8]}")
 
     state = make_fake_state(names, base_dir=base_dir)
@@ -103,6 +104,38 @@ def main(argv=None):
         print("torn down.")
 
     return 0
+
+
+def _cleanup_orphaned_fake_dirs(projects):
+    """Remove leftover stream-eval-fake-<id>/ directories from prior
+    sessions that didn't tear down cleanly (kill -9, OS reboot,
+    etc.). Skips dirs that contain fake harnesses with active socket
+    files in /tmp -- those might still be in use by a running session.
+    """
+    import shutil
+    for child in projects.glob("stream-eval-fake-*"):
+        if not child.is_dir():
+            continue
+        # Read each *.output file's startup banner pid; if any of
+        # those pids has a live socket at /tmp/stream-eval-<pid>.sock,
+        # something's still using this dir and we should not touch it.
+        live = False
+        for output in child.glob("*.output"):
+            try:
+                first_line = output.read_text().splitlines()[0]
+            except (OSError, IndexError):
+                continue
+            import re
+            m = re.search(r"pid=(\d+)", first_line)
+            if m and Path(f"/tmp/stream-eval-{m.group(1)}.sock").exists():
+                live = True
+                break
+        if live:
+            continue
+        try:
+            shutil.rmtree(child)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

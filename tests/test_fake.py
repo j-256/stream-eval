@@ -159,6 +159,36 @@ def test_make_fake_state_rejects_unknown_in_list():
         make_fake_state(["completed", "this-does-not-exist"])
 
 
+def test_active_clean_writes_workers_sidecar_with_in_flight():
+    """active-clean declares in_flight=2; the sidecar JSON file must
+    exist and parse, with a `workers` array of length 2 and a
+    matching harness_pid."""
+    import json
+    with make_fake_state("active-clean") as state:
+        sidecars = list(state.base_dir and __import__("pathlib")
+                        .Path(state.base_dir).glob("*.workers.json"))
+        assert len(sidecars) == 1
+        data = json.loads(sidecars[0].read_text())
+        # The harness pid in the sidecar must match one of the fake
+        # state's allocated pids -- otherwise find_claude_workers_for
+        # wouldn't surface these workers under the right row.
+        assert data["harness_pid"] in state.fake_pids
+        assert len(data["workers"]) == 2
+
+
+def test_active_with_failures_includes_in_flight_retries():
+    """active-with-failures declares in_flight_retries_per_pid=2;
+    each fake worker in the sidecar has retries=2 and a non-empty
+    last_error so the dashboard surfaces the retry counter."""
+    import json
+    with make_fake_state("active-with-failures") as state:
+        from pathlib import Path
+        sidecars = list(Path(state.base_dir).glob("*.workers.json"))
+        data = json.loads(sidecars[0].read_text())
+        assert all(w["retries"] == 2 for w in data["workers"])
+        assert all(w["last_error"] for w in data["workers"])
+
+
 def test_full_spread_has_one_of_each_state():
     """The visual smoke benchmark scenario must produce at least
     one row of each status state machine value (except 'completed'

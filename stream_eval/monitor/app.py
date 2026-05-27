@@ -43,6 +43,10 @@ def create_app(session=None):
             row.target_workers = _row_target_workers(row)
             row.workers_for_row = _claude_workers_for_row(row)
             row.recent = _recent_for_row(row)
+            row.in_flight_count = len(row.workers_for_row)
+            row.in_flight_retries = sum(
+                w.get("retries", 0) for w in row.workers_for_row
+            )
         return {
             "state": state,
             "session": _resolve_session(),

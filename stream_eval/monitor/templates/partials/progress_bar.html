@@ -6,6 +6,11 @@
     {% if row.harness_pid is not none %}
       <span class="harness-pid">pid {{ row.harness_pid }}</span>
     {% endif %}
+    {% if row.status == "active" %}
+      <span class="in-flight-stat" title="{{ row.in_flight_count }} claude pids running, {{ row.in_flight_retries }} api_retry events in flight">
+        {{ row.in_flight_count }} in flight, {{ row.in_flight_retries }} retries
+      </span>
+    {% endif %}
     {% set total = row.total_fixtures * row.runs %}
     {% set passed = row.cells | selectattr('pass_', 'equalto', true) | list | length %}
     <span class="qpass">{{ passed }}/{{ total }} pass</span>
@@ -16,9 +21,20 @@
             title="{{ cell.fixture_id }} run {{ cell.run }}{% if cell.contaminated %} (CONTAMINATED -- pass verdict unaudited){% endif %}"></span>
     {% endfor %}
     {% set remaining = (row.total_fixtures * row.runs) - row.cells|length %}
-    {% for _ in range(remaining if remaining > 0 else 0) %}
-      <span class="cell pending"></span>
-    {% endfor %}
+    {% if remaining > 0 %}
+      {# In-flight cells come right after the done count, capped at remaining.
+         Pending cells fill what's left. The legacy monitor's
+         "next K cells after done are in-flight" model -- workers don't
+         fill slots strictly in order, but "is anything happening right
+         now?" is answered correctly regardless of exact slot mapping. #}
+      {% set in_flight_n = [row.in_flight_count or 0, remaining] | min %}
+      {% for _ in range(in_flight_n) %}
+        <span class="cell in-flight" title="in flight"></span>
+      {% endfor %}
+      {% for _ in range(remaining - in_flight_n) %}
+        <span class="cell pending"></span>
+      {% endfor %}
+    {% endif %}
   </div>
   {% if row.status == "active" and row.harness_pid is not none %}
     <div class="controls">

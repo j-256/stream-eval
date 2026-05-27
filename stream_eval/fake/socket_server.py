@@ -36,6 +36,7 @@ class FakeSocketServer:
         self._state = initial_state
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._ready = threading.Event()
         self._sock = None
         self._thread = threading.Thread(
             target=self._serve, daemon=True,
@@ -44,7 +45,6 @@ class FakeSocketServer:
         self._thread.start()
         # Give the listener a moment to bind so dashboard clients that
         # connect immediately don't get ECONNREFUSED.
-        self._ready = threading.Event()
         self._ready.wait(timeout=1.0)
 
     def _serve(self):
