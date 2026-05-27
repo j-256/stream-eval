@@ -23,6 +23,7 @@ for interactive smoke testing (the __main__ entry handles this).
 """
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -34,14 +35,22 @@ from stream_eval.runner import (
 )
 
 
-# Fake harness pids start well above typical real pids on macOS/Linux
-# (max_pid is 99999 on macOS, 4194304 on Linux) and are randomized to
-# avoid collisions with concurrent fake invocations. The fake never
-# spawns real processes, so these pids are ledger entries only -- the
-# dashboard's os.kill liveness probe will return False unless we
-# explicitly mark them alive (see is_pid_alive helper).
-_FAKE_PID_FLOOR = 200000
-_FAKE_PID_CEILING = 999999
+def _spawn_dummy_harness():
+    """Spawn a long-sleeping dummy subprocess. Its pid is the fake
+    harness pid -- a real OS-assigned pid that the dashboard's
+    os.kill liveness probe sees as alive, so rows render as 'active'
+    rather than 'aborted'.
+
+    Without this trick the .output banner would reference a number
+    that no real process ever held, so the dashboard couldn't tell
+    'fake harness running' apart from 'real harness died.'
+    """
+    return subprocess.Popen(
+        ["sleep", "999999"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 class FakeState:
@@ -51,11 +60,15 @@ class FakeState:
     Use as a context manager (recommended) or call close() manually
     when done."""
 
-    def __init__(self, base_dir, output_paths, sockets, fake_pids):
+    def __init__(self, base_dir, output_paths, sockets, fake_pids,
+                 dummy_procs=None):
         self.base_dir = base_dir
         self.output_paths = output_paths
         self.sockets = sockets  # list[FakeSocketServer]
         self.fake_pids = fake_pids  # set[int]
+        # Long-sleeping subprocesses whose pids are the harness pids
+        # in the .output banners. Closing FakeState terminates them.
+        self.dummy_procs = list(dummy_procs or [])
         self._closed = False
 
     def is_pid_alive(self, pid):
@@ -74,6 +87,15 @@ class FakeState:
         if self._closed:
             return
         self._closed = True
+        for proc in self.dummy_procs:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
         for sock in self.sockets:
             try:
                 sock.close()
@@ -116,28 +138,28 @@ class _Builder:
     progress/finish lines to."""
 
     def __init__(self, base_dir):
-        import random
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        # Pick a random starting pid so two concurrent `stream-eval fake`
-        # invocations don't both allocate from the same base and end up
-        # with overlapping pids (which would cross-contaminate sidecars
-        # and confuse the dashboard's per-row routing).
-        self._next_pid = random.randint(_FAKE_PID_FLOOR, _FAKE_PID_CEILING - 100)
         self.sockets = []
         self.fake_pids = set()
         self.output_paths = []
+        # Long-sleeping subprocesses; one per fake harness so its pid
+        # is real and the dashboard's liveness probe sees it alive.
+        self.dummy_procs = []
 
     def alloc_pid(self):
-        pid = self._next_pid
-        self._next_pid += 1
-        self.fake_pids.add(pid)
-        return pid
+        """Spawn a real long-sleeping subprocess and return its pid.
+        The pid is used in the .output banner and in the sidecar
+        JSON; closing the FakeState terminates the subprocess."""
+        proc = _spawn_dummy_harness()
+        self.dummy_procs.append(proc)
+        self.fake_pids.add(proc.pid)
+        return proc.pid
 
     def start_eval(self, *, skill, kind, total_fixtures, runs,
                    workers=4, eval_path=None, pid=None,
                    live_socket=False, file_name=None, in_flight=0,
-                   in_flight_retries_per_pid=0):
+                   in_flight_retries_per_pid=0, dead_pid=False):
         """Open an .output file with a startup banner. Returns an
         _EvalHandle the caller fills with progress lines and an
         optional finish banner.
@@ -153,9 +175,24 @@ class _Builder:
         back to the sidecar, which lets fake scenarios render the
         pulsing in-flight cells and the retries-in-flight counter
         without spinning up real subprocesses.
+
+        If dead_pid=True, the fake harness pid is NOT backed by a
+        real subprocess. The dashboard's liveness probe will return
+        False, and rows without a finish banner fall through to
+        status='aborted'. Used by the aborted-no-finish-banner
+        scenario, which exists specifically to render that state.
         """
         if pid is None:
-            pid = self.alloc_pid()
+            if dead_pid:
+                # Allocate a pid that's almost certainly not a real
+                # process: well above macOS's 99999 ceiling and
+                # randomized inside Linux's 4M range. The os.kill
+                # liveness probe returns False, status='aborted'.
+                import random
+                pid = random.randint(200000, 999999)
+                self.fake_pids.add(pid)
+            else:
+                pid = self.alloc_pid()
         else:
             self.fake_pids.add(pid)
         eval_path = eval_path or f"evals/{skill}/{kind}-eval.json"
@@ -321,7 +358,7 @@ def _scenario_concurrent(b):
 def _scenario_completed(b):
     h = b.start_eval(
         skill="dsc-scrape", kind="trigger",
-        total_fixtures=3, runs=1, live_socket=False,
+        total_fixtures=3, runs=1, live_socket=False, dead_pid=True,
     )
     for i in range(3):
         h.complete_run(fixture_id=f"q{i}", run=1, pass_=True)
@@ -331,10 +368,11 @@ def _scenario_completed(b):
 def _scenario_aborted(b):
     """Finish banner verdict=aborted -- the harness bailed early
     (timeout or throttle). Status state machine should pick this up
-    directly from the banner."""
+    directly from the banner. dead_pid=True since a verdict=aborted
+    harness has already exited."""
     h = b.start_eval(
         skill="dsc-endpoint-help", kind="synthesis",
-        total_fixtures=10, runs=1, live_socket=False,
+        total_fixtures=10, runs=1, live_socket=False, dead_pid=True,
     )
     for i in range(3):
         h.complete_run(fixture_id=f"q{i}", run=1, pass_=True)
@@ -344,14 +382,12 @@ def _scenario_aborted(b):
 def _scenario_aborted_no_finish_banner(b):
     """Startup banner present, no progress for a while, no finish
     banner -- the runner was killed (Ctrl-C, OOM) before it could
-    stamp the verdict. Status falls through to pid-liveness; if the
-    pid isn't alive (FakeState's default), status='aborted'.
-
-    No in_flight here: an aborted harness has no live children, even
-    in the live-but-no-finish-banner case where status='active'."""
+    stamp the verdict. Status falls through to pid-liveness, which
+    returns False because dead_pid=True, so the row lands at
+    'aborted'."""
     h = b.start_eval(
         skill="dsc-triage-fake", kind="trigger",
-        total_fixtures=10, runs=1, live_socket=False,
+        total_fixtures=10, runs=1, live_socket=False, dead_pid=True,
     )
     h.complete_run(fixture_id="q0", run=1, pass_=True)
     # No finish banner.
@@ -383,7 +419,7 @@ def _scenario_over_cap(b):
     for i in range(7):
         h = b.start_eval(
             skill="dsc-cap-test", kind="trigger",
-            total_fixtures=2, runs=1, live_socket=False,
+            total_fixtures=2, runs=1, live_socket=False, dead_pid=True,
         )
         h.complete_run(fixture_id="q0", run=1, pass_=True)
         h.complete_run(fixture_id="q1", run=1, pass_=True)
@@ -451,4 +487,5 @@ def make_fake_state(scenarios, *, base_dir=None):
         output_paths=list(b.output_paths),
         sockets=list(b.sockets),
         fake_pids=set(b.fake_pids),
+        dummy_procs=list(b.dummy_procs),
     )
