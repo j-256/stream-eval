@@ -248,5 +248,18 @@ class TestScoreSynthesisRun(unittest.TestCase):
             self.assertFalse(extra["assertion_results"][0]["pass"])
 
 
+class TestPreflightGuards(unittest.TestCase):
+    """`stream-eval synthesis --profile=isolated` (the default) without
+    --skill-path must fail at the CLI, not in every spawned worker."""
+
+    def test_profile_isolated_without_skill_path_errors(self):
+        with self.assertRaises(SystemExit) as ctx:
+            synthesis_eval.main([
+                "--eval", "/tmp/nonexistent.json",
+                "--out", "/tmp/nonexistent-out.json",
+            ])
+        self.assertEqual(ctx.exception.code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

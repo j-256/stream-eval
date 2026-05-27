@@ -100,9 +100,17 @@ def prepare_isolated_home(*, skill_path, also_install=()):
     skill_name = parse_skill_md_name(skill_path)
 
     sibling_paths = []
+    seen_names = {skill_name}
     for sib in also_install:
         sib_path = Path(sib).resolve()
         sib_name = parse_skill_md_name(sib_path)
+        if sib_name in seen_names:
+            raise SkillMetadataError(
+                f"duplicate skill name {sib_name!r}: --also-install path "
+                f"{sib_path!s} has the same name as a previously-resolved "
+                f"skill (primary or earlier sibling)"
+            )
+        seen_names.add(sib_name)
         sibling_paths.append((sib_path, sib_name))
 
     tmp = tempfile.mkdtemp(prefix=f"stream-eval-{os.getpid()}-")

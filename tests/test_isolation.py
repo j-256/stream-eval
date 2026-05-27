@@ -202,6 +202,54 @@ def test_atexit_reaper_leaves_other_pids_alone(tmp_path, monkeypatch):
     assert other.exists()
 
 
+def test_prepare_isolated_home_rejects_sibling_with_primary_name(tmp_path):
+    """Two skills with the same name in the same skills dir would yield a
+    cryptic FileExistsError from os.symlink. Catch it earlier with a
+    domain-specific SkillMetadataError pointing at --also-install."""
+    skill = _make_skill(tmp_path, "skill-a")
+    # Build a sibling at a different path but with the same `name:` field.
+    sibling_dir = tmp_path / "elsewhere"
+    sibling_dir.mkdir()
+    sibling = _make_skill(sibling_dir, "skill-a")
+
+    with pytest.raises(SkillMetadataError, match="duplicate skill name"):
+        with prepare_isolated_home(
+            skill_path=skill, also_install=(sibling,)
+        ):
+            pass
+
+
+def test_prepare_isolated_home_rejects_two_siblings_with_same_name(tmp_path):
+    """Two --also-install paths whose SKILL.md frontmatter both name
+    'skill-x' should raise as cleanly as a primary/sibling collision."""
+    skill = _make_skill(tmp_path, "skill-a")
+    sib1_dir = tmp_path / "sib1"
+    sib1_dir.mkdir()
+    sib1 = _make_skill(sib1_dir, "shared-name")
+    sib2_dir = tmp_path / "sib2"
+    sib2_dir.mkdir()
+    sib2 = _make_skill(sib2_dir, "shared-name")
+
+    with pytest.raises(SkillMetadataError, match="duplicate skill name"):
+        with prepare_isolated_home(
+            skill_path=skill, also_install=(sib1, sib2)
+        ):
+            pass
+
+
+def test_parse_skill_md_name_strips_single_quotes(tmp_path):
+    """Single-quoted name values should also strip cleanly. The regex
+    accepts both quote styles."""
+    _write_skill_md(
+        tmp_path,
+        "---\n"
+        "name: 'my-skill'\n"
+        "description: does a thing\n"
+        "---\n",
+    )
+    assert parse_skill_md_name(tmp_path) == "my-skill"
+
+
 def test_env_overlay_reaches_child_process(tmp_path):
     """End-to-end check that the env dict passed to
     run_with_retry_aware_bail propagates HOME to the spawned child.

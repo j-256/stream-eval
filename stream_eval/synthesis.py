@@ -275,6 +275,15 @@ def main(argv=None):
 
     from stream_eval.isolation import parse_skill_md_name
 
+    # Pre-flight: profile=isolated needs a skill_path so prepare_isolated_home
+    # has something to symlink. Fail at the CLI rather than in every worker.
+    if args.profile == "isolated" and not args.skill_path:
+        ap.error(
+            "--skill-path is required when --profile=isolated "
+            "(the default). Pass --profile=inherit (or =restricted) to "
+            "test the user's globally-installed skill instead."
+        )
+
     if args.skill_path:
         skill_path = os.path.abspath(args.skill_path)
         skill_name = args.skill_name or parse_skill_md_name(skill_path)

@@ -113,5 +113,20 @@ class TestScoreTriggerRun(unittest.TestCase):
             self.assertIsNone(extra["first_tool"])
 
 
+class TestPreflightGuards(unittest.TestCase):
+    """`stream-eval trigger --profile=isolated` (the default) without
+    --skill-path must fail at the CLI, not in every spawned worker."""
+
+    def test_profile_isolated_without_skill_path_errors(self):
+        # ap.error calls SystemExit(2). We don't need a real eval file
+        # because argparse fails before reading any.
+        with self.assertRaises(SystemExit) as ctx:
+            trigger_eval.main([
+                "--eval", "/tmp/nonexistent.json",
+                "--out", "/tmp/nonexistent-out.json",
+            ])
+        self.assertEqual(ctx.exception.code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
