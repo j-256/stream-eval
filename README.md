@@ -293,7 +293,7 @@ stream-eval fake all                           # every scenario, simultaneously
 
 Real operation has every state coexisting; pass several scenarios (comma-separated) or `all` to render them simultaneously. The single `full-spread` scenario is a curated subset (one of each state); `all` renders every scenario including the larger ones.
 
-The driver synthesizes the scenarios into a tempdir, symlinks it under `~/.claude/projects/stream-eval-fake/` so the dashboard's file walk picks it up, and blocks on Ctrl+C. Tear-down removes the symlink and unlinks the fake sockets.
+The driver synthesizes the scenarios directly into `~/.claude/projects/stream-eval-fake-<id>/` so the dashboard's file walk picks them up, and blocks on Ctrl+C. Tear-down removes the directory and unlinks the fake sockets. (A symlink to a tempdir wouldn't work: `Path.rglob` on Python 3.13+ doesn't follow symlinks by default.)
 
 Programmatic use (tests, dev scripts):
 ```python

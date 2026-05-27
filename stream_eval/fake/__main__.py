@@ -1,13 +1,14 @@
 """Interactive driver: `python3 -m stream_eval.fake <scenarios>`.
 
-Synthesizes one or more scenarios into a temp dir, prints the path,
-and blocks on Ctrl-C so the dashboard can render against it. The
-dashboard discovers fake .output files via ps._output_paths ->
-~/.claude/projects.
+Synthesizes one or more scenarios into a directory under
+~/.claude/projects/stream-eval-fake-<id>/, prints the path, and
+blocks on Ctrl-C so the dashboard can render against it. The
+directory is removed at exit.
 
-To make the fake visible to a real running dashboard, this driver
-symlinks the temp dir under ~/.claude/projects/stream-eval-fake/ for
-the duration of the session. The symlink is removed at exit.
+The dashboard discovers .output files by walking ~/.claude/projects
+with Path.rglob, which on Python 3.13+ does NOT follow symlinks --
+so we have to write directly into a real directory inside that tree.
+A symlink to a tempdir would be invisible to the dashboard.
 
 Usage:
     python3 -m stream_eval.fake concurrent
@@ -19,9 +20,9 @@ Real operation has every state coexisting; pass several scenarios
 (comma-separated) or `all` to render them simultaneously.
 """
 import argparse
-import os
 import signal
 import sys
+import uuid
 from pathlib import Path
 
 from stream_eval.fake import SCENARIOS, make_fake_state
@@ -33,10 +34,11 @@ def main(argv=None):
         "scenario", nargs="?",
         help="scenario name, comma-separated list, or 'all' / 'list'",
     )
-    ap.add_argument("--base-dir",
-                    help="write .output files here instead of a tempdir")
-    ap.add_argument("--no-symlink", action="store_true",
-                    help="don't symlink under ~/.claude/projects/")
+    ap.add_argument(
+        "--base-dir",
+        help="write .output files here instead of "
+             "~/.claude/projects/stream-eval-fake-<id>/",
+    )
     args = ap.parse_args(argv)
 
     if not args.scenario or args.scenario == "list":
@@ -60,32 +62,26 @@ def main(argv=None):
         print(f"choices: {sorted(SCENARIOS)}", file=sys.stderr)
         return 2
 
-    state = make_fake_state(names, base_dir=args.base_dir)
+    base_dir = args.base_dir
+    if base_dir is None:
+        # Write directly into ~/.claude/projects/ rather than into a
+        # tempdir + symlink. Path.rglob in Python 3.13+ does NOT follow
+        # symlinks by default (recurse_symlinks=False), so the
+        # dashboard's _output_paths walk would never see fake files
+        # under a symlinked dir. Putting the fake dir inside the
+        # projects tree directly is the only way to be visible.
+        projects = Path.home() / ".claude" / "projects"
+        projects.mkdir(parents=True, exist_ok=True)
+        base_dir = str(projects / f"stream-eval-fake-{uuid.uuid4().hex[:8]}")
+
+    state = make_fake_state(names, base_dir=base_dir)
     print(f"scenarios: {', '.join(names)}")
     print(f"base_dir: {state.base_dir}")
     print(f"fake harness pids: {sorted(state.fake_pids)}")
     print(f"fake sockets: {[s.socket_path for s in state.sockets]}")
-
-    symlink_path = None
-    if not args.no_symlink:
-        projects = Path.home() / ".claude" / "projects"
-        if projects.is_dir():
-            symlink_path = projects / "stream-eval-fake"
-            try:
-                if symlink_path.is_symlink() or symlink_path.exists():
-                    symlink_path.unlink()
-                os.symlink(state.base_dir, symlink_path)
-                print(f"symlinked: {symlink_path} -> {state.base_dir}")
-            except OSError as exc:
-                print(f"could not symlink ({exc}); dashboard won't see "
-                      f"this scenario unless STREAM_EVAL_OUTPUT_LIMIT or "
-                      f"its file walk picks up {state.base_dir} directly",
-                      file=sys.stderr)
-                symlink_path = None
-
     print()
     print("Start the dashboard in another terminal:")
-    print("  stream-eval monitor serve --port 8765")
+    print("  stream-eval monitor serve --port 8765 --open")
     print()
     print("Press Ctrl+C to tear down.")
 
@@ -103,11 +99,6 @@ def main(argv=None):
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
-        if symlink_path is not None:
-            try:
-                symlink_path.unlink()
-            except OSError:
-                pass
         state.close()
         print("torn down.")
 
