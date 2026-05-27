@@ -928,11 +928,11 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
     id_pairs = assign_fixture_ids(fixtures, get_fixture_id)
 
     # Round-robin by run (run-major), not by fixture (fixture-major). With
-    # partial coverage – the gateway throttles, the harness aborts, the
-    # user Ctrl-Cs – round-robin guarantees every fixture gets at least
-    # one run before any fixture gets a second. Fixture-major ordering
-    # would leave declines at the tail of the corpus with 0 measurements
-    # while front-loaded fixtures got the full N runs.
+    # partial coverage -- the upstream API throttles, the harness aborts,
+    # the user Ctrl-Cs -- round-robin guarantees every fixture gets at
+    # least one run before any fixture gets a second. Fixture-major
+    # ordering would leave declines at the tail of the corpus with 0
+    # measurements while front-loaded fixtures got the full N runs.
     tasks = []
     for run_idx in range(1, runs_per_fixture + 1):
         for fixture_id, fixture in id_pairs:
@@ -1063,7 +1063,7 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
                 if r["timed_out"]:
                     aborted_on_timeout = True
                     cause = (
-                        "CLI's retry budget exhausted (gateway-poisoned signal)"
+                        "CLI's retry budget exhausted (upstream-poisoned signal)"
                         if r["timeout_reason"] == "retry_budget_exhausted"
                         else "absolute wall clock exceeded"
                     )
@@ -1073,7 +1073,7 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
                         f"-- {cause}. Cancelling remaining {remaining} runs. "
                         "Continuing measurements after a budget-exhaustion "
                         "event would mix real failures with throttle noise. "
-                        "Re-run when the gateway has recovered.",
+                        "Re-run when the upstream API has recovered.",
                         file=sys.stderr,
                     )
                     # Stop the dispatcher cleanly: target_workers=0

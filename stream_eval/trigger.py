@@ -21,12 +21,13 @@ with hermetic per-spawn isolation -- see docs/.)
 
 Bail signal is api_retry-aware. The CLI emits stream-json events of the
 shape `{"type":"system","subtype":"api_retry","attempt":N,"max_retries":M,
-"error":"rate_limit"|"server_error",...}` while waiting on the gateway.
-The harness streams the JSONL live and treats CLI internal retries as
-"waiting on gateway, not the model thinking" -- they don't count against
-the model-thinking timeout. A run aborts only when the CLI's full retry
-budget is exhausted (attempt == max_retries on the most recent retry
-event), which is the documented "gateway window is poisoned" condition.
+"error":"rate_limit"|"server_error",...}` while waiting on the upstream
+API. The harness streams the JSONL live and treats CLI internal retries
+as "waiting on upstream, not the model thinking" -- they don't count
+against the model-thinking timeout. A run aborts only when the CLI's
+full retry budget is exhausted (attempt == max_retries on the most
+recent retry event), which is the documented "retry budget poisoned"
+condition.
 A generous absolute wall clock (--timeout) acts as a safety backstop for
 truly hung processes.
 

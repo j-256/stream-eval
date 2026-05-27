@@ -5,10 +5,11 @@ The Claude CLI emits stream-json events of the shape
   {"type":"system","subtype":"api_retry","attempt":N,"max_retries":M,
    "error":"rate_limit"|"server_error",...}
 
-while waiting on the gateway. This module wraps `subprocess.Popen` so that
-CLI internal retries don't count against the harness's wall clock, and so
-that the harness bails honestly on the documented "gateway window is
-poisoned" condition (`attempt == max_retries` on a retry event).
+while waiting on the upstream API. This module wraps `subprocess.Popen`
+so that CLI internal retries don't count against the harness's wall
+clock, and so that the harness bails honestly on the documented
+"retry-budget poisoned" condition (`attempt == max_retries` on a retry
+event).
 
 Both `stream_eval.trigger` and `stream_eval.synthesis` use this so the bail
 semantics stay consistent across the two harnesses.

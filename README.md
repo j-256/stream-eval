@@ -189,7 +189,7 @@ Exit codes:
 |---|---|
 | 0 | All fixtures pass. |
 | 1 | At least one fixture fails. |
-| 3 | Aborted on api_retry budget exhaustion or wall-clock timeout. Continuing measurements after a budget-exhaustion event would mix real failures with throttle noise; re-run when the gateway has recovered. |
+| 3 | Aborted on api_retry budget exhaustion or wall-clock timeout. Continuing measurements after a budget-exhaustion event would mix real failures with throttle noise; re-run when the upstream API has recovered. |
 
 ### Synthesis
 
@@ -310,7 +310,7 @@ The harnesses read configuration from `.env` at the repo root (gitignored) via `
 
 | Variable | Default | Description |
 |---|---|---|
-| `STREAM_EVAL_MODEL` | `sonnet` | Model identifier passed to `claude -p --model`. Pin the exact gateway-accepted identifier (e.g. `claude-sonnet-4-6`) rather than relying on the `sonnet` alias, which resolves to the older Sonnet on this gateway. (Renamed from `DSC_EVAL_MODEL`.) |
+| `STREAM_EVAL_MODEL` | `sonnet` | Model identifier passed to `claude -p --model`. Pin an exact identifier (e.g. `claude-sonnet-4-6`) rather than the `sonnet` alias if your CLI's alias resolution doesn't target the version you want -- some deployments resolve `sonnet` to an older release. (Renamed from `DSC_EVAL_MODEL`.) |
 | `STREAM_EVAL_PROFILE` | `isolated` | Toolbelt profile (`isolated`, `restricted`, or `inherit`) for spawned `claude -p` subprocesses. (Renamed from `DSC_EVAL_PROFILE`; previous `default` profile renamed to `inherit`.) |
 | `STREAM_EVAL_OUTPUT_LIMIT` | `100` | Maximum `.output` files the dashboard parses on each refresh, ranked by mtime descending. Bump it if a slow active eval whose mtime falls outside the top-N starts disappearing mid-run. |
 | `STREAM_EVAL_PER_SKILL_CAP` | `5` | Per-(skill, kind) row cap. Active rows always bypass the cap; older completed/aborted rows are hidden once the cap is reached. Set to `0` to disable. |
