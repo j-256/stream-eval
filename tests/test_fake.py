@@ -129,6 +129,36 @@ def test_over_cap_drops_oldest_completed_rows():
         assert all(r.status == "completed" for r in ds.rows)
 
 
+def test_make_fake_state_accepts_a_list_of_scenarios():
+    """Callers can compose scenarios in one FakeState. Pid allocator
+    is shared, so the two evals get distinct pids; output_paths are
+    collected from both."""
+    with make_fake_state(["concurrent", "completed"]) as state:
+        ds = _build(state)
+        # `concurrent` -> 2 active rows, `completed` -> 1 completed row.
+        statuses = sorted(r.status for r in ds.rows)
+        assert statuses == ["active", "active", "completed"]
+        # Three distinct harness pids -- no allocator collisions.
+        pids = {r.harness_pid for r in ds.rows}
+        assert len(pids) == 3
+
+
+def test_make_fake_state_string_form_still_works():
+    """Backward compat: passing a single name string composes one
+    scenario, like the original API."""
+    with make_fake_state("completed") as state:
+        ds = _build(state)
+        assert len(ds.rows) == 1
+
+
+def test_make_fake_state_rejects_unknown_in_list():
+    """If any name in the list is unknown, the whole call fails
+    before any sockets/files are created."""
+    import pytest
+    with pytest.raises(KeyError):
+        make_fake_state(["completed", "this-does-not-exist"])
+
+
 def test_full_spread_has_one_of_each_state():
     """The visual smoke benchmark scenario must produce at least
     one row of each status state machine value (except 'completed'

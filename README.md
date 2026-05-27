@@ -285,21 +285,29 @@ The dashboard joins startup and finish by `pid` to distinguish active runs from 
 
 Run interactively:
 ```
-stream-eval fake list                  # show all scenarios
-stream-eval fake concurrent            # two active evals (pid routing)
-stream-eval fake full-spread           # one of every state
+stream-eval fake list                          # show all scenarios
+stream-eval fake concurrent                    # two active evals (pid routing)
+stream-eval fake concurrent,over-cap,legacy    # several at once
+stream-eval fake all                           # every scenario, simultaneously
 ```
 
-The driver synthesizes the scenario into a tempdir, symlinks it under `~/.claude/projects/stream-eval-fake/` so the dashboard's file walk picks it up, and blocks on Ctrl+C. Tear-down removes the symlink and unlinks the fake sockets.
+Real operation has every state coexisting; pass several scenarios (comma-separated) or `all` to render them simultaneously. The single `full-spread` scenario is a curated subset (one of each state); `all` renders every scenario including the larger ones.
+
+The driver synthesizes the scenarios into a tempdir, symlinks it under `~/.claude/projects/stream-eval-fake/` so the dashboard's file walk picks it up, and blocks on Ctrl+C. Tear-down removes the symlink and unlinks the fake sockets.
 
 Programmatic use (tests, dev scripts):
 ```python
 from stream_eval.fake import make_fake_state
 from stream_eval.monitor.state import build_state
 
+# One scenario:
 with make_fake_state("concurrent") as state:
     rows = build_state(state.output_paths, is_pid_alive=state.is_pid_alive).rows
     # ... assertions on rows
+
+# Several composed:
+with make_fake_state(["concurrent", "over-cap", "legacy"]) as state:
+    rows = build_state(state.output_paths, is_pid_alive=state.is_pid_alive).rows
 ```
 
 Scenarios cover: `active-clean`, `active-with-failures`, `active-with-contamination`, `concurrent`, `completed`, `aborted`, `aborted-no-finish-banner`, `legacy`, `over-cap`, `full-spread`. See `stream_eval/fake/runs.py` for builders -- adding a scenario is one function plus an entry in `SCENARIOS`.

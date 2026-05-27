@@ -361,20 +361,33 @@ SCENARIOS = {
 }
 
 
-def make_fake_state(scenario, *, base_dir=None):
-    """Build the named scenario. Returns a FakeState the caller
-    closes when done. If base_dir is None a tempdir is allocated
-    and removed on close.
+def make_fake_state(scenarios, *, base_dir=None):
+    """Build one or more named scenarios into a single FakeState.
+
+    `scenarios` can be a single name (`"concurrent"`) or an iterable
+    (`["concurrent", "over-cap", "legacy"]`). Multiple scenarios
+    share a base_dir, a pid allocator, and a sockets list, so the
+    rendered dashboard shows them all at once -- the realistic case,
+    where active runs, completed runs, aborted runs, and legacy
+    .output files coexist.
+
+    Returns a FakeState the caller closes when done. If base_dir is
+    None a tempdir is allocated and removed on close.
     """
-    if scenario not in SCENARIOS:
-        raise KeyError(
-            f"unknown scenario {scenario!r}; "
-            f"choices: {sorted(SCENARIOS)}"
-        )
+    if isinstance(scenarios, str):
+        scenarios = [scenarios]
+    names = list(scenarios)
+    for name in names:
+        if name not in SCENARIOS:
+            raise KeyError(
+                f"unknown scenario {name!r}; "
+                f"choices: {sorted(SCENARIOS)}"
+            )
     if base_dir is None:
         base_dir = tempfile.mkdtemp(prefix="stream-eval-fake-")
     b = _Builder(base_dir)
-    SCENARIOS[scenario](b)
+    for name in names:
+        SCENARIOS[name](b)
     return FakeState(
         base_dir=base_dir,
         output_paths=list(b.output_paths),
