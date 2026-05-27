@@ -40,7 +40,7 @@ def create_app(session=None):
     def _gather_state():
         state = build_state(find_output_files())
         for row in state.rows:
-            row.target_workers = _row_target_workers(row)
+            row.target_workers, row.dispatcher_state = _row_socket_snapshot(row)
             row.workers_for_row = _claude_workers_for_row(row)
             row.recent = _recent_for_row(row)
             row.in_flight_count = len(row.workers_for_row)
@@ -98,17 +98,28 @@ def create_app(session=None):
     return app
 
 
-def _row_target_workers(row):
-    """Read the live target_workers count from this row's harness
-    socket. Returns None for completed/aborted/unknown rows (no live
-    socket to talk to)."""
+def _row_socket_snapshot(row):
+    """Read both the target_workers count AND the dispatcher state
+    (running / paused) from this row's harness socket. Returns
+    (target_workers, dispatcher_state); both None for non-active rows
+    or when the socket isn't reachable.
+
+    Reading both in one call lets the dashboard show that pause
+    actually took effect -- the previous snapshot only read workers,
+    so a successful PAUSE made no visible change to the UI."""
     if row.status != "active" or row.harness_pid is None:
-        return None
+        return (None, None)
     sock_path = f"/tmp/stream-eval-{row.harness_pid}.sock"
+    client = HarnessSocketClient(sock_path)
     try:
-        return HarnessSocketClient(sock_path).get_workers()
+        workers = client.get_workers()
     except SocketClientError:
-        return None
+        return (None, None)
+    try:
+        state = client.get_state()
+    except SocketClientError:
+        state = None
+    return (workers, state)
 
 
 def _claude_workers_for_row(row):

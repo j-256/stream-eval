@@ -35,6 +35,12 @@ header { display: flex; align-items: baseline; gap: 1rem;
 }
 .in-flight-stat { color: #555; font-size: 0.85rem;
                   font-family: ui-monospace, monospace; }
+.dispatcher-state { font-size: 0.75rem; padding: 0.1rem 0.35rem;
+                    border-radius: 3px; text-transform: uppercase;
+                    letter-spacing: 0.05em; }
+.dispatcher-state.running { background: #4caf50; color: #fff; }
+.dispatcher-state.paused { background: #ff9800; color: #fff; }
+.controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Contaminated cells get a yellow outline regardless of pass/fail color
    so an eval-Sonnet that polluted the worktree mid-run is visible at a
    glance. The pass verdict on a contaminated run is unaudited. */

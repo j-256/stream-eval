@@ -110,6 +110,21 @@ def test_workers_route_rejects_non_integer_pid(client):
     assert rv.status_code == 404
 
 
+def test_dashboard_renders_dispatcher_state_badge(client):
+    """Active rows must show running / paused badges so a successful
+    PAUSE click produces a visible UI change. Without this, pause
+    'works' in the protocol but is invisible to the operator."""
+    with mock.patch(
+        "stream_eval.monitor.app.HarnessSocketClient"
+    ) as mock_cls:
+        instance = mock_cls.return_value
+        instance.get_workers.return_value = 4
+        instance.get_state.return_value = "paused"
+        rv = client.get("/")
+    body = rv.data.decode("utf-8")
+    assert "dispatcher-state paused" in body
+
+
 def test_socket_client_failure_does_not_500_the_dashboard(client):
     """If the harness has already exited, /tmp/stream-eval-<pid>.sock is
     missing; the route must absorb SocketClientError and still render

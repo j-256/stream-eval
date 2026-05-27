@@ -18,6 +18,30 @@
     {% block content %}{% endblock %}
   </main>
   <script>
+    /* Persist <details data-persist-key> open/closed state across
+       re-renders. Each refresh wholesale-replaces <main>, which
+       resets every <details> to its template default -- without
+       this, expanded "Active workers" / "Recent completions" blocks
+       collapse on every poll cycle. localStorage keeps the user's
+       choice durable. */
+    const DETAILS_STORAGE_PREFIX = "stream-eval-details:";
+    function applyPersistedDetails() {
+      document.querySelectorAll("details[data-persist-key]").forEach((el) => {
+        const key = DETAILS_STORAGE_PREFIX + el.dataset.persistKey;
+        const stored = localStorage.getItem(key);
+        if (stored === "open") el.open = true;
+        else if (stored === "closed") el.open = false;
+        // null = no preference, keep the template's default.
+      });
+    }
+    document.addEventListener("toggle", (ev) => {
+      const el = ev.target;
+      if (!(el instanceof HTMLDetailsElement)) return;
+      if (!el.dataset.persistKey) return;
+      const key = DETAILS_STORAGE_PREFIX + el.dataset.persistKey;
+      localStorage.setItem(key, el.open ? "open" : "closed");
+    }, true);
+
     /* Layered polling: 5s when active runs exist, 30s when idle, pause
        after ~3 min of no change. Click "refresh now" to resume. */
     const POLL_ACTIVE_MS = 5000;
@@ -33,6 +57,7 @@
         const html = await res.text();
         if (html !== lastHtml) {
           document.querySelector("main").innerHTML = html;
+          applyPersistedDetails();
           lastHtml = html;
           lastChange = Date.now();
         }
@@ -68,6 +93,7 @@
         const res = await fetch(form.action, { method: "POST" });
         const html = await res.text();
         document.querySelector("main").innerHTML = html;
+        applyPersistedDetails();
         lastHtml = html;
         lastChange = Date.now();
         if (timer) clearTimeout(timer);
@@ -78,6 +104,7 @@
       }
     });
 
+    applyPersistedDetails();
     refresh();
   </script>
 </body>

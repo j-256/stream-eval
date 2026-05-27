@@ -39,6 +39,11 @@
   {% if row.status == "active" and row.harness_pid is not none %}
     <div class="controls">
       <span class="workers-current">workers: <span class="workers-count">{{ row.target_workers if row.target_workers is not none else '?' }}</span></span>
+      {% if row.dispatcher_state == "paused" %}
+        <span class="dispatcher-state paused">paused</span>
+      {% elif row.dispatcher_state == "running" %}
+        <span class="dispatcher-state running">running</span>
+      {% endif %}
       <form method="post" action="{{ url_for('workers_decrement', pid=row.harness_pid) }}" style="display:inline">
         <button type="submit">-1</button>
       </form>
@@ -46,15 +51,17 @@
         <button type="submit">+1</button>
       </form>
       <form method="post" action="{{ url_for('workers_pause', pid=row.harness_pid) }}" style="display:inline">
-        <button type="submit">pause</button>
+        <button type="submit"{% if row.dispatcher_state == "paused" %} disabled{% endif %}>pause</button>
       </form>
       <form method="post" action="{{ url_for('workers_resume', pid=row.harness_pid) }}" style="display:inline">
-        <button type="submit">resume</button>
+        <button type="submit"{% if row.dispatcher_state == "running" %} disabled{% endif %}>resume</button>
       </form>
     </div>
   {% endif %}
+  {% set details_key_workers = 'row-workers:' ~ (row.harness_pid or 'legacy') ~ ':' ~ row.skill ~ ':' ~ row.kind %}
+  {% set details_key_recent = 'row-recent:' ~ (row.harness_pid or 'legacy') ~ ':' ~ row.skill ~ ':' ~ row.kind %}
   {% if row.workers_for_row %}
-    <details class="row-workers">
+    <details class="row-workers" data-persist-key="{{ details_key_workers }}" open>
       <summary>Active workers ({{ row.workers_for_row | length }})</summary>
       {% with active_workers = row.workers_for_row %}
         {% include "partials/workers_table.html" %}
@@ -62,7 +69,7 @@
     </details>
   {% endif %}
   {% if row.recent %}
-    <details class="row-recent">
+    <details class="row-recent" data-persist-key="{{ details_key_recent }}">
       <summary>Recent completions ({{ row.recent | length }})</summary>
       {% with recent = row.recent %}
         {% include "partials/recent_table.html" %}
