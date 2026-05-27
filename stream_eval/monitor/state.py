@@ -172,8 +172,21 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
     rows = list(rows_by_key.values())
     if per_skill_cap and per_skill_cap > 0:
         rows = _apply_per_skill_cap(rows, per_skill_cap)
-    rows.sort(key=lambda r: (r.skill, r.kind, -r.mtime))
+    # Order rows by status bucket first (active runs are usually what
+    # the operator is looking at), then by recency within each bucket.
+    # An eval that just finished lands at the top of the completed
+    # bucket -- right below your active rows -- rather than getting
+    # alphabetically buried mid-list.
+    rows.sort(key=lambda r: (_status_order(r.status), -r.mtime,
+                              r.skill, r.kind))
     return DashboardState(rows=rows)
+
+
+_STATUS_ORDER = {"active": 0, "aborted": 1, "completed": 2, "unknown": 3}
+
+
+def _status_order(status):
+    return _STATUS_ORDER.get(status, 99)
 
 
 def _apply_per_skill_cap(rows, cap):

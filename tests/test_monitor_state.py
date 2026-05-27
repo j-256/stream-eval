@@ -240,6 +240,56 @@ def test_build_state_per_skill_cap_disabled_with_zero(tmp_path):
     assert len(state.rows) == 10
 
 
+def test_build_state_orders_active_rows_first_then_recent(tmp_path):
+    """Active runs first (the operator's focus), then recency-ordered
+    inside each status bucket. A just-finished eval lands at the top
+    of the completed bucket -- right under any active rows -- rather
+    than getting alphabetically buried mid-list."""
+    import time
+    now = time.time()
+
+    # An old completed run, an alphabetically-earlier active run, and
+    # a freshly-completed run.
+    p_old = tmp_path / "old-completed.output"
+    p_old.write_text(
+        "=== eval starting: kind=trigger skill=zzz-skill "
+        "eval=evals/zzz/trigger-eval.json runs=1 workers=1 "
+        "total_fixtures=1 pid=70001 ===\n"
+        "=== eval finished: kind=trigger skill=zzz-skill "
+        "pid=70001 verdict=completed ===\n"
+    )
+    import os as _os
+    _os.utime(p_old, (now - 3600, now - 3600))
+
+    p_active = tmp_path / "active.output"
+    p_active.write_text(
+        "=== eval starting: kind=trigger skill=aaa-skill "
+        "eval=evals/aaa/trigger-eval.json runs=1 workers=1 "
+        "total_fixtures=1 pid=70002 ===\n"
+    )
+    _os.utime(p_active, (now - 60, now - 60))
+
+    p_fresh = tmp_path / "fresh-completed.output"
+    p_fresh.write_text(
+        "=== eval starting: kind=trigger skill=mmm-skill "
+        "eval=evals/mmm/trigger-eval.json runs=1 workers=1 "
+        "total_fixtures=1 pid=70003 ===\n"
+        "=== eval finished: kind=trigger skill=mmm-skill "
+        "pid=70003 verdict=completed ===\n"
+    )
+    _os.utime(p_fresh, (now, now))
+
+    state = build_state(
+        [p_old, p_active, p_fresh],
+        is_pid_alive=lambda pid: pid == 70002,
+    )
+    assert [(r.skill, r.status) for r in state.rows] == [
+        ("aaa-skill", "active"),
+        ("mmm-skill", "completed"),
+        ("zzz-skill", "completed"),
+    ]
+
+
 def test_build_state_orphan_finish_banner_does_not_crash(tmp_path):
     """A finish banner whose pid never had a startup banner (impossible
     in practice, but a malformed .output file shouldn't crash the
