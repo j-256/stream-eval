@@ -240,6 +240,40 @@ def test_build_state_per_skill_cap_disabled_with_zero(tmp_path):
     assert len(state.rows) == 10
 
 
+def test_build_state_orphan_finish_banner_does_not_crash(tmp_path):
+    """A finish banner whose pid never had a startup banner (impossible
+    in practice, but a malformed .output file shouldn't crash the
+    dashboard) is silently dropped: no row is emitted for it."""
+    p = tmp_path / "orphan.output"
+    p.write_text(
+        "=== eval finished: kind=trigger skill=ghost "
+        "pid=77777 verdict=completed ===\n"
+    )
+    state = build_state([p], is_pid_alive=lambda pid: False)
+    assert state.rows == []
+
+
+def test_build_state_per_skill_cap_underflow_when_active_exceeds_cap(tmp_path):
+    """Cap=2, active_count=4. The cap math (max(cap - active, 0)) must
+    not return a negative slot count; all 4 active rows survive."""
+    paths = []
+    for i in range(4):
+        p = tmp_path / f"a{i}.output"
+        p.write_text(
+            f"=== eval starting: kind=trigger skill=dsc-scrape "
+            f"eval=evals/dsc-scrape/trigger-eval.json runs=1 workers=1 "
+            f"total_fixtures=1 pid={6000 + i} ===\n"
+        )
+        paths.append(p)
+    state = build_state(
+        paths,
+        is_pid_alive=lambda pid: True,
+        per_skill_cap=2,
+    )
+    assert len(state.rows) == 4
+    assert all(r.status == "active" for r in state.rows)
+
+
 def test_build_state_per_skill_cap_separate_skills_get_separate_caps(tmp_path):
     """Cap applies per (skill, kind) independently. Cap=2 with 3 of
     skill A and 3 of skill B -> 4 rows total, 2 per skill."""

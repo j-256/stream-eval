@@ -125,10 +125,11 @@ def _recent_for_row(row):
     """Last 5 cells for this row, rendered as recent-completion records.
 
     DashboardCell only carries (fixture_id, run, pass_, contaminated)
-    today -- elapsed/retries/first_tool/first_skill/asserts/query are
-    on the runner's progress line but not retained in state.py. F.5.5
-    can pull those forward; for now we surface what we have and leave
-    the richer fields blank."""
+    today. The runner's progress line carries more
+    (elapsed/retries/first_tool/first_skill/asserts/query) but state.py
+    discards them after computing pass/fail. A follow-up could plumb
+    them through DashboardCell so the recent-completions table can
+    show the same depth as the original eval-monitor."""
     out = []
     for cell in reversed(row.cells[-5:]):
         out.append({

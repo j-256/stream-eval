@@ -100,6 +100,53 @@ def test_find_claude_workers_for_returns_claude_children():
     assert workers[0]["pid"] == 201
 
 
+def test_find_claude_workers_for_rejects_git_subprocess_with_claude_in_path():
+    """The runner spawns git for worktree management. A git invocation
+    whose --git-dir path happens to contain 'claude' (e.g.
+    /Users/me/claude-code-skills/.git) must NOT be reported as a
+    claude worker -- only argv[0]'s basename being exactly 'claude'
+    counts."""
+    from stream_eval.monitor.ps import find_claude_workers_for
+
+    parent = _fake_proc(
+        100, 1, "python3",
+        ["python3", "-m", "stream_eval.cli", "trigger"],
+        1.0,
+    )
+    fake_git = _fake_proc(
+        300, 100, "git",
+        ["git",
+         "--git-dir=/Users/me/claude-code-skills/.git",
+         "status", "--porcelain"],
+        2.0,
+    )
+    parent.children = mock.MagicMock(return_value=[fake_git])
+
+    with mock.patch("stream_eval.monitor.ps.psutil.Process",
+                    return_value=parent):
+        workers = list(find_claude_workers_for(100))
+    assert workers == []
+
+
+def test_find_claude_workers_for_accepts_absolute_path_to_claude():
+    """argv[0] being /usr/local/bin/claude is the common production
+    shape -- the basename match must accept it."""
+    from stream_eval.monitor.ps import find_claude_workers_for
+
+    parent = _fake_proc(100, 1, "python3", ["python3", "-m", "x"], 1.0)
+    abs_claude = _fake_proc(
+        301, 100, "claude",
+        ["/usr/local/bin/claude", "-p", "--output-format", "stream-json"],
+        2.0,
+    )
+    parent.children = mock.MagicMock(return_value=[abs_claude])
+    with mock.patch("stream_eval.monitor.ps.psutil.Process",
+                    return_value=parent):
+        workers = list(find_claude_workers_for(100))
+    assert len(workers) == 1
+    assert workers[0]["pid"] == 301
+
+
 def test_find_claude_workers_for_returns_empty_when_parent_missing():
     """A dead/never-existed harness pid yields nothing rather than
     raising. The dashboard polls into this every refresh and must

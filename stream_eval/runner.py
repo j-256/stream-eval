@@ -255,8 +255,7 @@ STARTUP_BANNER_RE = re.compile(
     # pid= is optional so the regex still parses banners written before
     # F.5 added per-eval pid routing. New runs always include it.
     r"(?:\s+pid=(?P<pid>\d+))?"
-    r"\s*===",
-    re.MULTILINE,
+    r"\s*==="
 )
 
 
@@ -271,8 +270,7 @@ FINISH_BANNER_RE = re.compile(
     r"skill=(?P<skill>\S+)\s+"
     r"pid=(?P<pid>\d+)\s+"
     r"verdict=(?P<verdict>completed|aborted)"
-    r"\s*===",
-    re.MULTILINE,
+    r"\s*==="
 )
 
 

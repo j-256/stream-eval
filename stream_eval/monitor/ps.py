@@ -99,16 +99,14 @@ def find_claude_workers_for(harness_pid):
             cmd = child.cmdline()
             if not cmd:
                 continue
-            # The runner spawns claude via either an absolute path or
-            # the PATH-resolved name; the cmdline always includes
-            # 'claude' as the binary basename. Filter to those: a
-            # Python `find_eval_workers`-style harness child would
-            # have 'python3' or similar.
-            if not any("claude" in tok for tok in cmd[:1]):
-                # Be a bit more lenient: some launchers wrap claude;
-                # accept if 'claude' appears anywhere in argv[0..2].
-                if not any("claude" in tok for tok in cmd[:3]):
-                    continue
+            # Match argv[0]'s basename exactly. The runner spawns
+            # `claude` (PATH-resolved) or an absolute path ending in
+            # `claude`. A substring-anywhere-in-argv[0..2] match would
+            # false-positive on the runner's own git subprocesses
+            # (e.g. `git --git-dir=/x/claude-code-skills/.git ...`),
+            # which it shells out to often during worktree management.
+            if Path(cmd[0]).name != "claude":
+                continue
             yield {
                 "pid": child.pid,
                 "started_at": child.create_time(),
@@ -218,12 +216,17 @@ def find_output_files(*, limit=None):
     `limit` files by mtime, and the per-skill cap is applied later in
     state.build_state so 'active' rows aren't dropped by accident.
 
-    `limit` defaults to STREAM_EVAL_OUTPUT_LIMIT or 30. Set very high
-    or pass limit=None to disable the cap entirely (for one-shot CLI
-    summaries that want everything).
+    Caveat: a slow active eval whose progress writes are infrequent
+    can have an old enough mtime that it falls outside the top-N when
+    the operator is running many parallel evals. Bump
+    STREAM_EVAL_OUTPUT_LIMIT in that case. A future revision could
+    do a two-stage scan (top-N by mtime UNION files whose harness
+    pid is alive) to make this guarantee unconditional.
+
+    `limit` defaults to STREAM_EVAL_OUTPUT_LIMIT or 100.
     """
     if limit is None:
-        limit = int(os.environ.get("STREAM_EVAL_OUTPUT_LIMIT", "30"))
+        limit = int(os.environ.get("STREAM_EVAL_OUTPUT_LIMIT", "100"))
     paths = []
     for p in _output_paths():
         try:

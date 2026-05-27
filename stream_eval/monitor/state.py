@@ -38,7 +38,6 @@ class DashboardRow:
     total_fixtures: int
     runs: int
     cells: list = field(default_factory=list)
-    eval_path: Optional[str] = None
     # Harness pid stamped by the runner's startup banner. None for legacy
     # banners (pre-F.5) -- those rows render with `status="unknown"` and
     # no per-row controls. Used to bind worker-control buttons to the
@@ -117,7 +116,6 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
                         kind=banner["kind"],
                         total_fixtures=banner["total_fixtures"],
                         runs=banner["runs"],
-                        eval_path=banner["eval"],
                         harness_pid=banner["pid"],
                         mtime=mtime,
                     ),

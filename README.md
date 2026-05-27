@@ -312,7 +312,7 @@ The harnesses read configuration from `.env` at the repo root (gitignored) via `
 |---|---|---|
 | `STREAM_EVAL_MODEL` | `sonnet` | Model identifier passed to `claude -p --model`. Pin the exact gateway-accepted identifier (e.g. `claude-sonnet-4-6`) rather than relying on the `sonnet` alias, which resolves to the older Sonnet on this gateway. (Renamed from `DSC_EVAL_MODEL`.) |
 | `STREAM_EVAL_PROFILE` | `isolated` | Toolbelt profile (`isolated`, `restricted`, or `inherit`) for spawned `claude -p` subprocesses. (Renamed from `DSC_EVAL_PROFILE`; previous `default` profile renamed to `inherit`.) |
-| `STREAM_EVAL_OUTPUT_LIMIT` | `30` | Maximum `.output` files the dashboard parses on each refresh. Tunable upward for very busy operator setups. |
+| `STREAM_EVAL_OUTPUT_LIMIT` | `100` | Maximum `.output` files the dashboard parses on each refresh, ranked by mtime descending. Bump it if a slow active eval whose mtime falls outside the top-N starts disappearing mid-run. |
 | `STREAM_EVAL_PER_SKILL_CAP` | `5` | Per-(skill, kind) row cap. Active rows always bypass the cap; older completed/aborted rows are hidden once the cap is reached. Set to `0` to disable. |
 
 Existing environment values win over `.env`; `.env` only fills gaps. No-op if `.env` is missing.
