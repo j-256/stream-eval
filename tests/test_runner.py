@@ -1164,9 +1164,6 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
         )
 
 
-import tempfile
-
-
 class TestResolveHarnessVersion(unittest.TestCase):
     """_resolve_harness_version reads .git/HEAD when available, falls
     back to stream_eval.__version__, returns ('unknown', 'unknown') if

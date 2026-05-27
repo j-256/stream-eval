@@ -57,6 +57,13 @@ def _resolve_harness_version(package_dir=None):
     2. Otherwise, return (stream_eval.__version__, "package_version").
     3. If __version__ is missing, return ("unknown", "unknown").
 
+    Any OSError reading inside .git or __init__.py is treated as a
+    miss and falls through to the next lookup strategy. This guards
+    against restricted-permission CI environments, broken symlinks in
+    .git, or transient disk errors -- the version stamp is a
+    nice-to-have, not load-bearing, so we'd rather degrade to
+    "unknown" than crash run_eval after a successful eval.
+
     `package_dir` is the directory containing __init__.py; defaults to
     the real stream_eval package's directory. Override in tests.
     """
@@ -71,24 +78,32 @@ def _resolve_harness_version(package_dir=None):
     if git_dir.is_dir():
         head_path = git_dir / "HEAD"
         if head_path.is_file():
-            head = head_path.read_text().strip()
+            try:
+                head = head_path.read_text().strip()
+            except OSError:
+                head = ""
             if head.startswith("ref:"):
                 ref = head[len("ref:"):].strip()
                 ref_file = git_dir / ref
                 if ref_file.is_file():
-                    sha = ref_file.read_text().strip()
+                    try:
+                        sha = ref_file.read_text().strip()
+                    except OSError:
+                        sha = ""
                     if sha:
                         return (sha, "git_sha")
                 # Fall through to next strategy if ref unresolvable.
-            else:
+            elif head:
                 # Detached HEAD; HEAD itself is the SHA.
-                if head:
-                    return (head, "git_sha")
+                return (head, "git_sha")
 
     # Fallback: package __version__.
     init = package_dir / "__init__.py"
     if init.is_file():
-        text = init.read_text()
+        try:
+            text = init.read_text()
+        except OSError:
+            text = ""
         for line in text.splitlines():
             line = line.strip()
             if line.startswith("__version__"):
@@ -99,6 +114,7 @@ def _resolve_harness_version(package_dir=None):
                     return (val, "package_version")
 
     return ("unknown", "unknown")
+
 
 # MCP and Agent strip flags. Used by both `isolated` and `restricted`
 # profiles below; pulled out to a constant so the two stay in sync if the
