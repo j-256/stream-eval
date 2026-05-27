@@ -279,6 +279,31 @@ Finish banner (emitted after the last task scores or the harness aborts):
 
 The dashboard joins startup and finish by `pid` to distinguish active runs from completed and aborted ones, and routes per-row worker-control buttons to `/tmp/stream-eval-<pid>.sock`. `tail -f` on the underlying `.output` file is human-readable as-is.
 
+## Dashboard development: fake scenarios
+
+`stream_eval.fake` synthesizes `.output` files and stateful in-memory socket servers for every dashboard state without running real evals. Useful for visual smoke testing, regression harnesses for dashboard changes, and reproducing routing-class bugs.
+
+Run interactively:
+```
+stream-eval fake list                  # show all scenarios
+stream-eval fake concurrent            # two active evals (pid routing)
+stream-eval fake full-spread           # one of every state
+```
+
+The driver synthesizes the scenario into a tempdir, symlinks it under `~/.claude/projects/stream-eval-fake/` so the dashboard's file walk picks it up, and blocks on Ctrl+C. Tear-down removes the symlink and unlinks the fake sockets.
+
+Programmatic use (tests, dev scripts):
+```python
+from stream_eval.fake import make_fake_state
+from stream_eval.monitor.state import build_state
+
+with make_fake_state("concurrent") as state:
+    rows = build_state(state.output_paths, is_pid_alive=state.is_pid_alive).rows
+    # ... assertions on rows
+```
+
+Scenarios cover: `active-clean`, `active-with-failures`, `active-with-contamination`, `concurrent`, `completed`, `aborted`, `aborted-no-finish-banner`, `legacy`, `over-cap`, `full-spread`. See `stream_eval/fake/runs.py` for builders -- adding a scenario is one function plus an entry in `SCENARIOS`.
+
 ## Configuration via `.env`
 
 The harnesses read configuration from `.env` at the repo root (gitignored) via `stream_eval/env.py`. See `.env.example` for the full list. Common knobs:

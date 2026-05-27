@@ -30,6 +30,9 @@ def main(argv=None):
     if cmd == "monitor":
         from stream_eval.monitor import main as monitor_main
         return monitor_main(rest)
+    if cmd == "fake":
+        from stream_eval.fake.__main__ import main as fake_main
+        return fake_main(rest)
 
     # Unknown subcommand is a usage error: stderr + exit 2.
     print(f"stream-eval: unknown subcommand: {cmd!r}", file=sys.stderr)
@@ -45,6 +48,7 @@ def _print_help(*, file):
         "  trigger    run the trigger-accuracy harness\n"
         "  synthesis  run the synthesis-behavior harness\n"
         "  monitor    serve the live dashboard\n"
+        "  fake       synthesize a scenario for dashboard development\n"
         "\n"
         "Run `stream-eval <subcommand> --help` for subcommand-specific options.",
         file=file,
