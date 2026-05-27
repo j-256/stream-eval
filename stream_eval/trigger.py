@@ -49,8 +49,10 @@ import argparse
 import functools
 import json
 import os
+import threading
 from pathlib import Path
 
+from stream_eval.control import install_signal_handlers, serve_socket
 from stream_eval.runner import run_eval
 
 
@@ -170,6 +172,12 @@ def main(argv=None):
 
     os.environ["STREAM_EVAL_PROFILE"] = args.profile
 
+    install_signal_handlers()
+    sock_path = f"/tmp/stream-eval-{os.getpid()}.sock"
+    threading.Thread(
+        target=serve_socket, args=(sock_path,), daemon=True
+    ).start()
+
     cwd = args.cwd or os.getcwd()
     queries = json.load(open(args.eval))
 
@@ -234,6 +242,11 @@ def main(argv=None):
 
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
+
+    try:
+        os.unlink(sock_path)
+    except FileNotFoundError:
+        pass
 
     return exit_code
 

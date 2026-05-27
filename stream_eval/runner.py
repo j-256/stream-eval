@@ -1,6 +1,6 @@
 """Shared eval-runner library for stream_eval.trigger and stream_eval.synthesis.
 
-Owns: ProcessPoolExecutor dispatch, abort-on-first-timeout, the canonical
+Owns: Dispatcher-based dispatch, abort-on-first-timeout, the canonical
 stderr progress line, the startup banner, the results-JSON envelope,
 fixture-id assignment with collision detection, worktree-isolation
 detect+restore around each spawn.
@@ -19,9 +19,11 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+
+from stream_eval.pool import Dispatcher
 
 from stream_eval.env import load_dotenv
 from stream_eval.isolation import prepare_isolated_home
@@ -29,6 +31,19 @@ from stream_eval.subprocess import run_with_retry_aware_bail
 
 load_dotenv()
 EVAL_MODEL = os.environ.get("STREAM_EVAL_MODEL", "sonnet")
+
+# Set during run_eval; signal handlers and socket listeners use this
+# to adjust the running dispatcher's target_workers / state. None when
+# no eval is in flight.
+_CURRENT_DISPATCHER = None
+
+
+def get_current_dispatcher():
+    """Return the running Dispatcher, or None if no eval is in flight.
+
+    Used by stream_eval.control's signal handlers and socket listener
+    to bind their commands to the current run."""
+    return _CURRENT_DISPATCHER
 
 # MCP and Agent strip flags. Used by both `isolated` and `restricted`
 # profiles below; pulled out to a constant so the two stay in sync if the
@@ -644,7 +659,9 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
 
 
 def _pool_target(args_tuple):
-    """Top-level pickle target for ProcessPoolExecutor."""
+    """Legacy pickle target retained for reference. Not called by the
+    Dispatcher-based dispatch path; kept so any external callers that
+    reference it by name do not break on import."""
     (fixture, run_idx, fixture_id, transcript_dir, timeout, cwd,
      get_query, score_run, skill_path, also_install) = args_tuple
     return _run_one_task(fixture, run_idx, fixture_id,
@@ -653,12 +670,66 @@ def _pool_target(args_tuple):
                           skill_path=skill_path, also_install=also_install)
 
 
+class _SubprocessWorker:
+    """Adapter from _run_one_task's call signature to the WorkerSlot
+    contract Dispatcher expects (start, is_done, join, result).
+
+    Runs _run_one_task in a daemon thread; the actual `claude -p`
+    subprocess is spawned inside that thread (so the thread blocks on
+    Popen.wait, not on a process-pool boundary). One thread per
+    in-flight subprocess; thread overhead is negligible compared to
+    the multi-second `claude -p` runtime.
+    """
+    __slots__ = ("_task", "_kwargs", "_thread", "_done", "result")
+
+    def __init__(self, task, kwargs):
+        self._task = task
+        self._kwargs = kwargs
+        self._thread = None
+        self._done = threading.Event()
+        self.result = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            self.result = _run_one_task(**self._kwargs)
+        except Exception as exc:
+            # Swallowing here would silently drop the task; surface as
+            # a failure record the harness can score.
+            self.result = {
+                "fixture_id": self._kwargs.get("fixture_id"),
+                "run_idx": self._kwargs.get("run_idx"),
+                "elapsed_seconds": 0,
+                "total_retries": 0,
+                "timed_out": False,
+                "timeout_reason": None,
+                "transcript_path": None,
+                "pass_": False,
+                "kind_extra": {"error": repr(exc)},
+                "worktree_contaminated": False,
+                "worktree_changed_paths": [],
+                "worktree_restore_failures": [],
+            }
+        finally:
+            self._done.set()
+
+    def is_done(self):
+        return self._done.is_set()
+
+    def join(self, timeout=None):
+        if self._thread:
+            self._thread.join(timeout=timeout)
+
+
 def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
              summarize, runs_per_fixture, workers, timeout, cwd,
              transcript_dir, summary_label,
              skill_name, eval_path,
              skill_path=None, also_install=(),
-             executor_class=ProcessPoolExecutor):
+             executor_class=None):
     """Drive the eval. Returns (results_dict, exit_code).
 
     Caller writes the JSON and propagates exit code.
@@ -712,11 +783,9 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
         startup banner and stored in the envelope's `eval_set` field
         for downstream tooling.
 
-    executor_class is ProcessPoolExecutor in production. Tests pass
-    ThreadPoolExecutor so mock.patch reaches workers (process-pool
-    workers run in separate processes and don't see parent-process
-    patches). Cancel semantics are identical for not-yet-running
-    futures across both pool types.
+    executor_class is accepted but ignored. Retained for backward
+    compatibility with callers that were written when the dispatch path
+    used concurrent.futures; the Dispatcher-based path does not need it.
     """
     # Force line-buffered stderr so each progress line flushes
     # immediately. When the harness runs under a Bash tool's
@@ -763,104 +832,156 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
 
     results_by_id = {fid: {"fixture": fx, "runs": []}
                       for fid, fx in id_pairs}
-    total = len(tasks)
+    # Build kwargs dicts for each task so _SubprocessWorker can call
+    # _run_one_task(**kwargs) without unpacking a positional tuple.
+    task_kwargs_list = []
+    for (fx, run_idx, fixture_id, td, to, task_cwd,
+         gq, sr, sp, ai) in tasks:
+        task_kwargs_list.append({
+            "fixture": fx,
+            "run_idx": run_idx,
+            "fixture_id": fixture_id,
+            "transcript_dir": td,
+            "timeout": to,
+            "cwd": task_cwd,
+            "get_query": gq,
+            "score_run": sr,
+            "skill_path": sp,
+            "also_install": ai,
+        })
+
+    total = len(task_kwargs_list)
     t0 = time.time()
     done = 0
     aborted_on_timeout = False
 
-    with executor_class(max_workers=workers) as ex:
-        futures = {ex.submit(_pool_target, t): t for t in tasks}
-        for fut in as_completed(futures):
-            (fx, run_idx, fixture_id, _td, _to, _cwd,
-             _gq, _sr, _sp, _ai) = futures[fut]
-            try:
-                r = fut.result()
-            except Exception as e:
-                r = {
-                    "fixture_id": fixture_id, "run_idx": run_idx,
-                    "elapsed_seconds": 0.0, "total_retries": 0,
-                    "timed_out": False, "timeout_reason": None,
-                    "transcript_path": None, "pass_": False,
-                    "kind_extra": {"error": f"runner crashed: {e}"},
-                    "worktree_contaminated": False,
-                    "worktree_changed_paths": [],
-                    "worktree_restore_failures": [],
-                }
-            results_by_id[fixture_id]["runs"].append(r)
-            done += 1
+    def _spawn(kwargs):
+        return _SubprocessWorker(task=kwargs, kwargs=kwargs)
 
-            # Map runner-internal timeout_reason ("retry_budget_exhausted",
-            # "wall_clock", None) to the on-line vocabulary
-            # ("retry_budget", "wall_clock", "none"). Shorter, no None
-            # to handle on the parsing side.
-            tr_internal = r.get("timeout_reason")
-            if tr_internal == "retry_budget_exhausted":
-                tr_line = "retry_budget"
-            elif tr_internal == "wall_clock":
-                tr_line = "wall_clock"
-            else:
-                tr_line = "none"
+    dispatcher = Dispatcher(target_workers=workers, spawn_worker=_spawn)
+    for kwargs in task_kwargs_list:
+        dispatcher.submit(kwargs)
 
-            kx = r.get("kind_extra") or {}
-            print(
-                _format_progress(
-                    n=done, total=total, kind=kind,
-                    pass_=r["pass_"],
-                    fixture_id=r["fixture_id"],
-                    run_idx=r["run_idx"],
-                    elapsed_seconds=r["elapsed_seconds"],
-                    total_retries=r["total_retries"],
-                    timeout_reason=tr_line,
-                    first_tool=kx.get("first_tool") or "-",
-                    first_skill=kx.get("first_skill") or "-",
-                    failed_asserts=sum(
-                        1 for ar in kx.get("assertion_results") or []
-                        if not ar.get("pass", False)
-                    ),
-                    contaminated=r.get("worktree_contaminated", False),
-                    query=get_query(fx),
-                ),
-                file=sys.stderr,
-            )
+    # Stash the dispatcher at module level so control surfaces (added in
+    # D6) can adjust it from outside. Reset to None in the finally block.
+    global _CURRENT_DISPATCHER
+    _CURRENT_DISPATCHER = dispatcher
 
-            if r.get("worktree_contaminated"):
-                changed = r.get("worktree_changed_paths") or []
-                failures = r.get("worktree_restore_failures") or []
-                msg = (
-                    f"  ! WORKTREE CONTAMINATED on "
-                    f"{r['fixture_id']}-{r['run_idx']}: "
-                    f"{len(changed)} path(s) changed -- "
-                    f"{', '.join(changed[:5])}"
-                    + (f" (+{len(changed) - 5} more)" if len(changed) > 5 else "")
-                )
-                if failures:
-                    msg += (
-                        f"; worktree teardown FAILED on "
-                        f"{', '.join(failures)} (clean by hand)"
-                    )
+    def _drive_dispatcher():
+        # timeout=None means run_until_complete cannot raise TimeoutError;
+        # any other exception is a real bug we want to surface, not swallow.
+        # The thread is daemon=True so an uncaught exception prints the
+        # traceback to stderr without aborting the main thread.
+        dispatcher.run_until_complete(timeout=None)
+
+    driver = threading.Thread(target=_drive_dispatcher, daemon=True)
+    driver.start()
+
+    try:
+        while done < total:
+            new_records = list(dispatcher.drain_completed())
+            if not new_records:
+                time.sleep(0.05)
+                continue
+            for r in new_records:
+                # Look up the fixture for the query display.
+                fx = results_by_id[r["fixture_id"]]["fixture"]
+                fixture_id = r["fixture_id"]
+                run_idx = r["run_idx"]
+
+                results_by_id[fixture_id]["runs"].append(r)
+                done += 1
+
+                # Map runner-internal timeout_reason
+                # ("retry_budget_exhausted", "wall_clock", None) to the
+                # on-line vocabulary ("retry_budget", "wall_clock", "none").
+                tr_internal = r.get("timeout_reason")
+                if tr_internal == "retry_budget_exhausted":
+                    tr_line = "retry_budget"
+                elif tr_internal == "wall_clock":
+                    tr_line = "wall_clock"
                 else:
-                    msg += "; worktree destroyed (operator repo untouched)"
-                print(msg, file=sys.stderr)
+                    tr_line = "none"
 
-            if r["timed_out"]:
-                aborted_on_timeout = True
-                cause = (
-                    "CLI's retry budget exhausted (gateway-poisoned signal)"
-                    if r["timeout_reason"] == "retry_budget_exhausted"
-                    else "absolute wall clock exceeded"
-                )
+                kx = r.get("kind_extra") or {}
                 print(
-                    f"\n=== ABORT: run {fixture_id}-{run_idx} timed out -- "
-                    f"{cause}. Cancelling remaining {len(futures) - done} runs. "
-                    "Continuing measurements after a budget-exhaustion event "
-                    "would mix real failures with throttle noise. Re-run when "
-                    "the gateway has recovered.",
+                    _format_progress(
+                        n=done, total=total, kind=kind,
+                        pass_=r["pass_"],
+                        fixture_id=r["fixture_id"],
+                        run_idx=r["run_idx"],
+                        elapsed_seconds=r["elapsed_seconds"],
+                        total_retries=r["total_retries"],
+                        timeout_reason=tr_line,
+                        first_tool=kx.get("first_tool") or "-",
+                        first_skill=kx.get("first_skill") or "-",
+                        failed_asserts=sum(
+                            1 for ar in kx.get("assertion_results") or []
+                            if not ar.get("pass", False)
+                        ),
+                        contaminated=r.get("worktree_contaminated", False),
+                        query=get_query(fx),
+                    ),
                     file=sys.stderr,
                 )
-                for pending in futures:
-                    if not pending.done():
-                        pending.cancel()
+
+                if r.get("worktree_contaminated"):
+                    changed = r.get("worktree_changed_paths") or []
+                    failures = r.get("worktree_restore_failures") or []
+                    msg = (
+                        f"  ! WORKTREE CONTAMINATED on "
+                        f"{r['fixture_id']}-{r['run_idx']}: "
+                        f"{len(changed)} path(s) changed -- "
+                        f"{', '.join(changed[:5])}"
+                        + (
+                            f" (+{len(changed) - 5} more)"
+                            if len(changed) > 5 else ""
+                        )
+                    )
+                    if failures:
+                        msg += (
+                            f"; worktree teardown FAILED on "
+                            f"{', '.join(failures)} (clean by hand)"
+                        )
+                    else:
+                        msg += "; worktree destroyed (operator repo untouched)"
+                    print(msg, file=sys.stderr)
+
+                if r["timed_out"]:
+                    aborted_on_timeout = True
+                    cause = (
+                        "CLI's retry budget exhausted (gateway-poisoned signal)"
+                        if r["timeout_reason"] == "retry_budget_exhausted"
+                        else "absolute wall clock exceeded"
+                    )
+                    remaining = total - done
+                    print(
+                        f"\n=== ABORT: run {fixture_id}-{run_idx} timed out "
+                        f"-- {cause}. Cancelling remaining {remaining} runs. "
+                        "Continuing measurements after a budget-exhaustion "
+                        "event would mix real failures with throttle noise. "
+                        "Re-run when the gateway has recovered.",
+                        file=sys.stderr,
+                    )
+                    # Stop the dispatcher cleanly: target_workers=0
+                    # blocks any further spawns, and stop() transitions
+                    # the state machine to STOPPED so the driver thread's
+                    # run_until_complete loop exits on its next poll
+                    # iteration (within ~poll_interval seconds). pause()
+                    # alone wouldn't do this -- pause keeps iterating
+                    # the reap loop and never reaches the done condition
+                    # because state==PAUSED inhibits the transition to
+                    # STOPPED.
+                    dispatcher.target_workers = 0
+                    dispatcher.stop()
+                    break
+
+            if aborted_on_timeout:
                 break
+    finally:
+        _CURRENT_DISPATCHER = None
+
+    driver.join(timeout=10)
 
     elapsed = time.time() - t0
 
