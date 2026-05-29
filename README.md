@@ -86,7 +86,7 @@ Principle: the runner owns *how* runs are dispatched and aborted; the harnesses 
 | File | Responsibility |
 |---|---|
 | `stream_eval/env.py` | Tiny `.env` loader; runs at import time so harnesses can read `STREAM_EVAL_MODEL` etc. without external dependencies. |
-| `stream_eval/subprocess.py` | `run_with_retry_aware_bail`: spawns `claude -p`, streams stdout to a transcript file, watches for `api_retry` events, bails when the CLI's retry budget is exhausted (`attempt == max_retries`) or a wall-clock backstop fires. Used by the runner to keep CLI internal retries from counting against the harness's wall clock. |
+| `stream_eval/subprocess.py` | `run_with_retry_aware_bail`: spawns `claude -p`, streams stdout to a transcript file, watches for `api_retry` events, bails on three signals: retry-budget exhaustion (`attempt == max_retries`), a retry-aware wall clock that excludes backoff time from the deadline, and an absolute `4 * timeout` backstop for the stuck-during-retry case. The retry-window state machine lives on `RetryClock` (testable in isolation). |
 | `stream_eval/runner.py` | Shared library both harnesses delegate to. Owns: process-pool dispatch, abort-on-first-timeout, results-JSON envelope, canonical stderr progress line, startup banner, `assign_fixture_ids` with collision detection. Does NOT know fixture schemas or scoring rules. |
 | `stream_eval/trigger.py` | Trigger-accuracy harness. Loads `trigger-eval.json`, validates, calls `run_eval` with `score_trigger_run` (which walks the transcript for the first `tool_use`) and a `summarize` callback (per-query trigger rate >= 0.5 matches `should_trigger`). |
 | `stream_eval/synthesis.py` | Synthesis-behavior harness. Loads `synthesis-eval.json`, validates fixture schema and assertion kinds, calls `run_eval` with `score_synthesis_run` (parses transcript, evaluates typed assertions) and a strict-or-lenient `summarize` callback. |
@@ -216,7 +216,7 @@ stream-eval trigger \
 | Flag | Default | Description |
 |---|---|---|
 | `--runs` | `3` | Runs per fixture. |
-| `--timeout` | `1800` | Per-run wall-clock backstop, in seconds. Counts retry-backoff time, which compounds fast under throttle (we've seen starting waits around 60s). Trigger runs themselves are short (~10-40s without retries), so this default holds up under light/moderate throttle; under heavy throttle, see [Limitations](#limitations-and-out-of-scope) and consider bumping. |
+| `--timeout` | `1800` | Per-run wall-clock backstop, in seconds. Measures effective model-thinking time only -- retry-backoff windows are excluded from the deadline. The default is generous for trigger runs (typically 10-40s without retries); under heavy throttle, retry-budget-exhaustion fires first via the api_retry signal. |
 
 ### Synthesis
 
@@ -231,7 +231,7 @@ stream-eval synthesis \
 | Flag | Default | Description |
 |---|---|---|
 | `--runs` | `5` | Higher than trigger because assertion failures can be noisy. |
-| `--timeout` | `600` | Per-run wall-clock backstop. Counts retry-backoff time, same as trigger. Synthesis runs without retries are typically a few minutes; the 10-minute default leaves room for a couple of retries before retry-budget-exhaustion has a chance to fire. Under heavier throttle, bump it (or run fewer workers); see [Limitations](#limitations-and-out-of-scope). |
+| `--timeout` | `600` | Per-run wall-clock backstop. Same retry-aware semantics as trigger (retry-backoff time excluded). Synthesis runs without retries are typically a few minutes; the 10-minute default of effective thinking time is generous. Under heavy throttle, retry-budget-exhaustion fires first. |
 | `--lenient` | off | Pass if majority of runs pass. Default is strict (every run must pass every assertion). |
 
 ### Profiles
@@ -373,7 +373,7 @@ Iteration notes can cite this directly so eval numbers stay correlatable across 
 - **Single-host only.** No multi-machine eval distribution.
 - **The dashboard is single-session-pinned.** Two parallel Claude Code sessions each running their own evals appear in two separate dashboards; cross-session aggregation is not supported.
 - **Throughput is upstream-limited.** Running with `--workers 4` against an unloaded API endpoint is roughly 4x of `--workers 1`; against a loaded one, throttle dominates and `--workers 2` may match `--workers 4` at lower retry frequency. The dashboard surfaces retry events; treat high retry rates as a signal to lower workers.
-- **Wall-clock `--timeout` counts retry-backoff time, and that interacts badly with the api_retry-exhaustion bail.** When the upstream throttles, the CLI retries with backoff – we've observed starting waits around 60s, but the full schedule (whether it caps, plateaus, or grows further) is internal to the CLI and we haven't characterized it. What we do know: a sustained throttle storm can blow trigger's 1800s default before retry 10 is reached; synthesis's default was previously 240s and could blow up after a single retry, which is why we bumped it to 600s as a stopgap until the retry-aware fix lands. Two consequences. **First, ambiguous failure mode:** a run that wall-clocks out under load could be a stuck skill (model in a tool-use loop) or just heavy throttle, and the harness reports the same `wall_timed_out=True` for both. **Second, signal stomping:** the api_retry-exhaustion bail (`attempt == max_retries`) is supposed to be the principled signal for "give up, upstream is poisoned" – but the wall clock fires before retry 10 is reached under realistic throttle, pre-empting that cleaner signal and reporting wall-clock-failure where exhaustion would have been the right verdict. The honest fix is to make the wall clock retry-aware: subtract retry-backoff time from the deadline so it reflects model-thinking time only, leaving api_retry-exhaustion as the clean throttle-bail signal. Until that lands, the operator workaround under heavy throttle is to bump `--timeout` generously enough that retry-budget-exhaustion can fire first. If iteration baselines start showing systematic wall-clock failures correlated with API load, this is the place to look.
+- **The CLI retry-backoff schedule is unobservable from outside.** When the upstream throttles, the CLI retries with backoff – we've observed starting waits around 60s, but the full schedule (whether it caps, plateaus, or grows further) is internal to the CLI. The harness handles this by making `--timeout` retry-aware (retry-backoff windows are excluded so the deadline reflects effective model-thinking time only), with a separate absolute backstop at 4 * timeout that catches the rare stuck-during-retry case where the CLI wedges inside a retry sleep with no further events – that surfaces as `timeout_reason=wall_clock_in_retry` in the progress line. If iteration baselines start showing systematic `wall_clock` (not `wall_clock_in_retry`) failures correlated with API load and individual runs that hit them weren't producing output for the full effective deadline, the timeout may need bumping for that workload.
 
 ## License
 

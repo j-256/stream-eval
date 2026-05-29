@@ -18,18 +18,15 @@ shape `{"type":"system","subtype":"api_retry","attempt":N,"max_retries":M,
 API. The harness streams the JSONL live and uses the most-recent retry
 event as a separate bail signal: a run aborts when the CLI's full retry
 budget is exhausted (attempt == max_retries on the most recent retry
-event), which is the documented "retry budget poisoned" condition. This
-fires before the wall clock would normally trigger.
+event), which is the documented "retry budget poisoned" condition.
 
-The absolute wall clock (--timeout) is a backstop for truly hung
-processes. It's not retry-aware -- retry-backoff time DOES count against
-it, since the harness measures wall-clock from spawn to now without
-pausing on retry events. With observed CLI backoff starting around 60s,
-even moderate throttle can blow past tight deadlines before the
-api_retry-exhaustion signal has a chance to fire. The default 1800s is
-generous, but under sustained throttle it can still fire before retry-
-budget exhaustion. See README "Limitations" for the open issue of making
-the wall clock retry-aware.
+The wall clock (--timeout) measures effective model-thinking time --
+retry-backoff windows are excluded from the deadline so heavy throttle
+doesn't pre-empt the api_retry-exhaustion signal. A separate absolute
+backstop at 4 * timeout catches the rare stuck-during-retry case where
+the CLI is wedged inside a retry sleep and emits nothing further; that
+surfaces as `timeout_reason=wall_clock_in_retry` and is distinct from
+the regular `wall_clock` (model-genuinely-slow) signal.
 
 Exit codes match stream_eval.synthesis:
   0 -- all queries pass

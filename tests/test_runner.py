@@ -204,6 +204,20 @@ class TestProgressLineRoundTrip(unittest.TestCase):
         })
         self.assertEqual(groups["timeout_reason"], "retry_budget")
 
+    def test_timeout_reason_wall_clock_in_retry(self):
+        """Stuck-during-retry case: the absolute backstop (4 * timeout)
+        fired while the CLI was wedged inside a retry sleep with no
+        further events. Distinct from regular wall_clock so operators
+        can triage skill-stuck vs. retry-mechanism-stuck after the fact."""
+        groups = self._round_trip({
+            "n": 8, "total": 10, "kind": "synthesis", "pass_": False,
+            "fixture_id": "q4", "run_idx": 2, "elapsed_seconds": 2400.0,
+            "total_retries": 1, "timeout_reason": "wall_clock_in_retry",
+            "first_tool": "-", "first_skill": "-",
+            "query": "...",
+        })
+        self.assertEqual(groups["timeout_reason"], "wall_clock_in_retry")
+
     def test_query_truncation_to_80_chars(self):
         long_q = "x" * 200
         groups = self._round_trip({

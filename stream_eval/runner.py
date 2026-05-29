@@ -204,7 +204,7 @@ PROGRESS_LINE_RE = re.compile(
     r"run=(?P<run>\d+)\s+"
     r"elapsed=(?P<elapsed>[\d.]+)s\s+"
     r"retries=(?P<retries>\d+)\s+"
-    r"timeout_reason=(?P<timeout_reason>none|retry_budget|wall_clock)\s+"
+    r"timeout_reason=(?P<timeout_reason>none|retry_budget|wall_clock_in_retry|wall_clock)\s+"
     r"first_tool=(?P<first_tool>\S+)\s+"
     r"first_skill=(?P<first_skill>\S+)\s+"
     r"failed_asserts=(?P<failed_asserts>\d+)"
@@ -812,11 +812,15 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
         bail = _spawn_and_bail(query, transcript_path, timeout, cwd,
                               skill_path=skill_path, also_install=also_install)
         elapsed = round(time.time() - t0, 2)
-        timed_out = bail["retry_budget_exhausted"] or bail["wall_timed_out"]
+        timed_out = (bail["retry_budget_exhausted"]
+                     or bail["wall_timed_out"]
+                     or bail.get("wall_timed_out_in_retry", False))
         if bail["retry_budget_exhausted"]:
             timeout_reason = "retry_budget_exhausted"
         elif bail["wall_timed_out"]:
             timeout_reason = "wall_clock"
+        elif bail.get("wall_timed_out_in_retry"):
+            timeout_reason = "wall_clock_in_retry"
         else:
             timeout_reason = None
 
@@ -1092,14 +1096,18 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
                 results_by_id[fixture_id]["runs"].append(r)
                 done += 1
 
-                # Map runner-internal timeout_reason
-                # ("retry_budget_exhausted", "wall_clock", None) to the
-                # on-line vocabulary ("retry_budget", "wall_clock", "none").
+                # Map runner-internal timeout_reason to the on-line
+                # vocabulary. Internal values: "retry_budget_exhausted",
+                # "wall_clock", "wall_clock_in_retry", None. Line
+                # values: "retry_budget", "wall_clock",
+                # "wall_clock_in_retry", "none".
                 tr_internal = r.get("timeout_reason")
                 if tr_internal == "retry_budget_exhausted":
                     tr_line = "retry_budget"
                 elif tr_internal == "wall_clock":
                     tr_line = "wall_clock"
+                elif tr_internal == "wall_clock_in_retry":
+                    tr_line = "wall_clock_in_retry"
                 else:
                     tr_line = "none"
 
