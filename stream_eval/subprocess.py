@@ -6,13 +6,18 @@ The Claude CLI emits stream-json events of the shape
    "error":"rate_limit"|"server_error",...}
 
 while waiting on the upstream API. This module wraps `subprocess.Popen`
-so that CLI internal retries don't count against the harness's wall
-clock, and so that the harness bails honestly on the documented
-"retry-budget poisoned" condition (`attempt == max_retries` on a retry
-event).
+to provide a separate bail signal driven by those events: a run aborts
+when the CLI exhausts its retry budget (`attempt == max_retries` on the
+most recent retry event), which is the documented "retry-budget
+poisoned" condition. The wrapper also enforces an absolute wall-clock
+backstop, but the wall clock is NOT retry-aware -- retry-backoff time
+counts against it, since this loop measures `time.time() - t0` without
+pausing on retry events. The two signals work in tandem: api_retry-
+exhaustion typically fires first under throttle, leaving the wall clock
+to catch processes that are stuck for non-retry reasons.
 
-Both `stream_eval.trigger` and `stream_eval.synthesis` use this so the bail
-semantics stay consistent across the two harnesses.
+Both `stream_eval.trigger` and `stream_eval.synthesis` use this so the
+bail semantics stay consistent across the two harnesses.
 """
 import json
 import subprocess

@@ -252,7 +252,7 @@ def main(argv=None):
                     help="Pass if majority of runs pass (default: strict -- "
                          "all runs must pass)")
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--timeout", type=int, default=240)
+    ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--cwd", default=None)
     ap.add_argument(
         "--profile", choices=["isolated", "restricted", "inherit"],

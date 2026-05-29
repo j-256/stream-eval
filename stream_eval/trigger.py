@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """Trigger-accuracy eval harness for skills.
 
-Fires claude -p runs and scores the first tool invocation. Was
-probe-eval.py historically (commit 1d1c08b); the rename matches the
-fixture format (`evals/<skill>/trigger-eval.json`) and disambiguates
-from stream_eval.synthesis.
+Fires claude -p runs and scores the first tool invocation.
 
 For each query in the eval set, spawn N runs of `claude -p --model sonnet
 <query>` in parallel. Parse the stream-json output; a run counts as
@@ -15,29 +12,33 @@ tool, text-only answer) counts as "not triggered."
 A query passes when its trigger rate meets its `should_trigger` expectation
 with a 0.5 threshold.
 
-Prerequisite: the skill must already be installed under ~/.claude/skills/
-with its real (clean) name. (Phase C of the extraction plan replaces this
-with hermetic per-spawn isolation -- see docs/.)
-
 Bail signal is api_retry-aware. The CLI emits stream-json events of the
 shape `{"type":"system","subtype":"api_retry","attempt":N,"max_retries":M,
 "error":"rate_limit"|"server_error",...}` while waiting on the upstream
-API. The harness streams the JSONL live and treats CLI internal retries
-as "waiting on upstream, not the model thinking" -- they don't count
-against the model-thinking timeout. A run aborts only when the CLI's
-full retry budget is exhausted (attempt == max_retries on the most
-recent retry event), which is the documented "retry budget poisoned"
-condition.
-A generous absolute wall clock (--timeout) acts as a safety backstop for
-truly hung processes.
+API. The harness streams the JSONL live and uses the most-recent retry
+event as a separate bail signal: a run aborts when the CLI's full retry
+budget is exhausted (attempt == max_retries on the most recent retry
+event), which is the documented "retry budget poisoned" condition. This
+fires before the wall clock would normally trigger.
 
-Exit codes mirror stream_eval.synthesis:
+The absolute wall clock (--timeout) is a backstop for truly hung
+processes. It's not retry-aware -- retry-backoff time DOES count against
+it, since the harness measures wall-clock from spawn to now without
+pausing on retry events. With observed CLI backoff starting around 60s,
+even moderate throttle can blow past tight deadlines before the
+api_retry-exhaustion signal has a chance to fire. The default 1800s is
+generous, but under sustained throttle it can still fire before retry-
+budget exhaustion. See README "Limitations" for the open issue of making
+the wall clock retry-aware.
+
+Exit codes match stream_eval.synthesis:
   0 -- all queries pass
   1 -- at least one query fails
+  2 -- fixture schema error (returned before any runs spawn)
   3 -- aborted on retry-budget exhaustion or absolute wall clock (no
        results.json written; throttle-corrupted partial data was the
        exact misleading state the abort is preventing -- re-run when the
-       gateway has recovered)
+       upstream API has recovered)
 
 Usage:
   stream-eval trigger \\
@@ -50,11 +51,53 @@ import argparse
 import functools
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 
 from stream_eval.control import install_signal_handlers, serve_socket
 from stream_eval.runner import run_eval
+
+
+class FixtureSchemaError(Exception):
+    """Raised when an eval JSON file fails schema validation. Mirrors
+    stream_eval.synthesis.FixtureSchemaError so the two harnesses share
+    exit-code 2 semantics. Each harness defines its own class to keep
+    them decoupled (the runner doesn't know about either)."""
+
+
+def validate_fixtures(fixtures):
+    """Validate a trigger eval set: top-level list of dicts, each with a
+    non-empty `query` (string) and a `should_trigger` (bool); optional
+    `name` (string) which must be unique across the set if present.
+    Raises FixtureSchemaError on the first violation, with a message
+    that names the offending index so authors can locate it."""
+    if not isinstance(fixtures, list):
+        raise FixtureSchemaError("top-level value must be a list of fixtures")
+    seen_names = set()
+    for i, fx in enumerate(fixtures):
+        prefix = f"fixture[{i}]"
+        if not isinstance(fx, dict):
+            raise FixtureSchemaError(f"{prefix} must be an object")
+        if not isinstance(fx.get("query"), str) or not fx["query"]:
+            raise FixtureSchemaError(
+                f"{prefix} missing required non-empty string 'query'"
+            )
+        if not isinstance(fx.get("should_trigger"), bool):
+            raise FixtureSchemaError(
+                f"{prefix} missing required bool 'should_trigger'"
+            )
+        name = fx.get("name")
+        if name is not None:
+            if not isinstance(name, str) or not name:
+                raise FixtureSchemaError(
+                    f"{prefix} 'name' must be a non-empty string when present"
+                )
+            if name in seen_names:
+                raise FixtureSchemaError(
+                    f"{prefix} duplicate name {name!r}"
+                )
+            seen_names.add(name)
 
 
 def get_trigger_query(fixture):
@@ -181,7 +224,13 @@ def main(argv=None):
 
     try:
         cwd = args.cwd or os.getcwd()
-        queries = json.load(open(args.eval))
+        with open(args.eval) as f:
+            queries = json.load(f)
+        try:
+            validate_fixtures(queries)
+        except FixtureSchemaError as e:
+            print(f"FIXTURE SCHEMA ERROR: {e}", file=sys.stderr)
+            return 2
 
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)

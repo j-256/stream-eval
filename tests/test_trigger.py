@@ -128,5 +128,72 @@ class TestPreflightGuards(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
 
 
+class TestValidateFixtures(unittest.TestCase):
+    """Trigger fixtures must validate before any runs spawn -- mirrors
+    stream_eval.synthesis's exit-code-2 semantics. Without validation,
+    a missing field would only surface mid-run as a confusing
+    KeyError. Failure here returns exit 2 cleanly."""
+
+    def test_valid_fixtures_pass(self):
+        fixtures = [
+            {"query": "anything", "should_trigger": True},
+            {"name": "decline", "query": "x", "should_trigger": False},
+        ]
+        trigger_eval.validate_fixtures(fixtures)  # should not raise
+
+    def test_top_level_must_be_list(self):
+        with self.assertRaises(trigger_eval.FixtureSchemaError):
+            trigger_eval.validate_fixtures({"query": "x", "should_trigger": True})
+
+    def test_missing_query_raises(self):
+        fixtures = [{"should_trigger": True}]
+        with self.assertRaises(trigger_eval.FixtureSchemaError):
+            trigger_eval.validate_fixtures(fixtures)
+
+    def test_empty_query_raises(self):
+        fixtures = [{"query": "", "should_trigger": True}]
+        with self.assertRaises(trigger_eval.FixtureSchemaError):
+            trigger_eval.validate_fixtures(fixtures)
+
+    def test_missing_should_trigger_raises(self):
+        fixtures = [{"query": "x"}]
+        with self.assertRaises(trigger_eval.FixtureSchemaError):
+            trigger_eval.validate_fixtures(fixtures)
+
+    def test_should_trigger_must_be_bool(self):
+        # The string "true" is a common mistake; explicitly reject it
+        # so the author gets a clear error rather than silently treating
+        # truthy strings as True.
+        fixtures = [{"query": "x", "should_trigger": "true"}]
+        with self.assertRaises(trigger_eval.FixtureSchemaError):
+            trigger_eval.validate_fixtures(fixtures)
+
+    def test_duplicate_names_raise(self):
+        fixtures = [
+            {"name": "dup", "query": "x", "should_trigger": True},
+            {"name": "dup", "query": "y", "should_trigger": False},
+        ]
+        with self.assertRaises(trigger_eval.FixtureSchemaError):
+            trigger_eval.validate_fixtures(fixtures)
+
+    def test_name_optional_when_absent(self):
+        # Most authored fixtures omit name; the runner assigns qN. The
+        # validator must allow that, only enforcing uniqueness when name
+        # is present.
+        fixtures = [
+            {"query": "x", "should_trigger": True},
+            {"query": "y", "should_trigger": False},
+        ]
+        trigger_eval.validate_fixtures(fixtures)
+
+    def test_empty_name_string_raises(self):
+        # If name is provided, it must be a non-empty string. An empty
+        # string is almost certainly an authoring mistake (and would
+        # collide silently across fixtures with the same empty name).
+        fixtures = [{"name": "", "query": "x", "should_trigger": True}]
+        with self.assertRaises(trigger_eval.FixtureSchemaError):
+            trigger_eval.validate_fixtures(fixtures)
+
+
 if __name__ == "__main__":
     unittest.main()
