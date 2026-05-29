@@ -13,6 +13,16 @@ A live dashboard surfaces in-flight runs of both kinds with a per-`(fixture, run
 
 ## Install
 
+For most users (one-line global install via [pipx](https://pipx.pypa.io/stable/how-to/install-pipx/)):
+
+```bash
+pipx install git+<repo-url>
+```
+
+`pipx` puts `stream-eval` on `$PATH` permanently with its dependencies isolated; no venv to activate before each invocation. To update later, `pipx upgrade stream-eval`.
+
+For development on stream-eval itself (editable install):
+
 ```bash
 git clone <repo-url>
 cd stream-eval
@@ -20,7 +30,9 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-After install, `stream-eval` is on `$PATH`:
+The `[dev]` extra adds `pytest` for the test suite. The `stream-eval` binary is on `$PATH` whenever the venv is active.
+
+Either way, verify install with:
 
 ```bash
 stream-eval trigger --help
@@ -30,9 +42,11 @@ stream-eval monitor --help
 
 ## Why this exists
 
-`skill-creator:run_eval.py` is the documented eval harness that ships with the skill-creator plugin. On this machine it produces misleading numbers because it registers skills as slash commands under UUID-suffixed names (`.claude/commands/<name>-skill-<uuid>.md`); slash commands appear in `slash_commands` but NOT in the `skills` list surfaced to Sonnet's `Skill` tool, so `Skill` invocations route to globals instead of the synthetic. The harness scores those routings as misses even though the real skill triggered.
+The `skill-creator` plugin ships its own trigger-eval harness at `scripts/run_eval.py`. It works, but it has a footgun under common setups, and its scope is narrower than the work stream-eval is built for: stream-eval also runs synthesis-level evals, ships a live dashboard, detects worktree contamination, and handles upstream-API throttling cleanly – none of which `run_eval.py` addresses.
 
-stream-eval installs the skill-under-test as a clean-name symlink under `~/.claude/skills/` and invokes the real CLI to score the actual `Skill` tool calls in the stream-json transcript.
+The footgun: `run_eval.py` writes a synthetic slash-command file at `<project>/.claude/commands/<skill-name>-skill-<uuid>.md` and scores by whether the model invokes that synthetic. When a real skill is also installed at `~/.claude/skills/<canonical-name>/` (which contributors often have, for dogfooding or interactive use), both entries appear in the catalog the model picks from – and empirically, under Sonnet 4.6, the model picks the canonical-named entry. The harness scores that as a miss. stream-eval's `--profile=isolated` (the default) builds a temp HOME with only the skill under test, so there's no canonical install to shadow the synthetic by construction.
+
+See [`docs/comparison-with-skill-creator.md`](docs/comparison-with-skill-creator.md) for the full mechanism, the experiments we ran to validate the choice, and a side-by-side capability comparison.
 
 ## Architecture
 
@@ -76,7 +90,7 @@ Principle: the runner owns *how* runs are dispatched and aborted; the harnesses 
 | `stream_eval/runner.py` | Shared library both harnesses delegate to. Owns: process-pool dispatch, abort-on-first-timeout, results-JSON envelope, canonical stderr progress line, startup banner, `assign_fixture_ids` with collision detection. Does NOT know fixture schemas or scoring rules. |
 | `stream_eval/trigger.py` | Trigger-accuracy harness. Loads `trigger-eval.json`, validates, calls `run_eval` with `score_trigger_run` (which walks the transcript for the first `tool_use`) and a `summarize` callback (per-query trigger rate >= 0.5 matches `should_trigger`). |
 | `stream_eval/synthesis.py` | Synthesis-behavior harness. Loads `synthesis-eval.json`, validates fixture schema and assertion kinds, calls `run_eval` with `score_synthesis_run` (parses transcript, evaluates typed assertions) and a strict-or-lenient `summarize` callback. |
-| `stream_eval/monitor.py` | Read-only HTML dashboard. Greps `ps` for live trigger/synthesis workers, parses the canonical stderr line from each, renders per-(skill, kind) state with a segmented bar. Also walks finished `.output` files via the runner's startup banner. Stdlib only; no pip install. |
+| `stream_eval/monitor.py` | Live HTML dashboard. Walks `ps` (psutil) for trigger/synthesis workers and finished `.output` files, renders per-(skill, kind, harness-pid) state with a segmented bar. Per-row worker controls (`+1`/`-1`/pause/resume) talk to the running harness over a Unix socket and mutate `target_workers` / `dispatcher_state` live. |
 | `tests/test_*.py` | Unit tests. Run with `pytest`. |
 
 ## Fixture schemas
@@ -159,6 +173,36 @@ Pass criterion (per fixture): `expected_skill` matched (if set) AND every assert
 
 ## Running an eval
 
+`stream-eval trigger` and `stream-eval synthesis` share most of their CLI surface. Common flags first, then the per-harness defaults and extras.
+
+### Common flags
+
+These behave identically for both harnesses; only the defaults for `--runs` and `--timeout` differ (see the per-harness sections below).
+
+| Flag | Description |
+|---|---|
+| `--eval` | Path to the fixture file (`trigger-eval.json` or `synthesis-eval.json`). Required. |
+| `--out` | Where to write results.json. Required; parent dirs are created. |
+| `--skill-path` | Path to the skill directory (containing `SKILL.md`). Required for the default `isolated` profile; the skill name is read from `SKILL.md`'s frontmatter `name:` field. |
+| `--skill-name` | Override the skill name. Required when `--skill-path` is omitted (for `restricted` or `inherit` profiles). |
+| `--also-install` | Path to a sibling skill to install alongside the skill under test. May be repeated. Only effective under the `isolated` profile. |
+| `--profile` | `isolated` (default), `restricted`, or `inherit`. See [Profiles](#profiles). |
+| `--workers` | Concurrent `claude -p` subprocesses. Default: `4`. |
+| `--cwd` | CWD for `claude -p` subprocesses. Default: current dir. |
+
+**Path-based input.** The harness reads the skill name from `<skill-path>/SKILL.md`'s frontmatter `name:` field. This decouples the skill's directory layout from its canonical name and avoids silent breakage when a directory is renamed.
+
+Both harnesses retain per-run stream-json transcripts at `runs/<iteration>/transcripts/<out-stem>/<fixture>-<N>.jsonl` for offline debugging.
+
+Exit codes are also shared:
+
+| Code | Meaning |
+|---|---|
+| 0 | All fixtures pass. |
+| 1 | At least one fixture fails. |
+| 2 | Fixture schema error, returned before any runs spawn. |
+| 3 | Aborted on api_retry budget exhaustion or wall-clock timeout. Continuing measurements after a budget-exhaustion event would mix real failures with throttle noise; re-run when the upstream API has recovered. |
+
 ### Trigger
 
 ```bash
@@ -169,27 +213,10 @@ stream-eval trigger \
     --out evals/dsc-endpoint-help/runs/iteration-N/results.json
 ```
 
-**Path-based input.** The harness reads the skill name from `<skill-path>/SKILL.md`'s frontmatter `name:` field. This decouples the skill's directory layout from its canonical name and avoids silent breakage when a directory is renamed.
-
 | Flag | Default | Description |
 |---|---|---|
-| `--eval` | required | Path to a `trigger-eval.json` fixture file. |
-| `--skill-path` | required for `isolated` profile | Path to the skill directory (containing `SKILL.md`). The skill name is read from `SKILL.md` frontmatter. |
-| `--skill-name` | from `SKILL.md` | Override the skill name. Required when `--skill-path` is omitted (for `restricted` or `inherit` profiles). |
-| `--also-install` | none | Path to a sibling skill to install alongside the skill under test. May be repeated. Only effective under the `isolated` profile. |
-| `--runs` | 3 | Runs per fixture. |
-| `--workers` | 4 | Concurrent `claude -p` subprocesses. |
-| `--timeout` | 1800 | Wall-clock backstop in seconds. Primary bail signal is api_retry exhaustion; this fires only for hung processes. |
-| `--cwd` | current dir | CWD for `claude -p` subprocesses. |
-| `--out` | required | Where to write results.json. Created with parents. |
-
-Exit codes:
-
-| Code | Meaning |
-|---|---|
-| 0 | All fixtures pass. |
-| 1 | At least one fixture fails. |
-| 3 | Aborted on api_retry budget exhaustion or wall-clock timeout. Continuing measurements after a budget-exhaustion event would mix real failures with throttle noise; re-run when the upstream API has recovered. |
+| `--runs` | `3` | Runs per fixture. |
+| `--timeout` | `1800` | Per-run wall-clock backstop, in seconds. Counts retry-backoff time, which compounds fast under throttle (we've seen starting waits around 60s). Trigger runs themselves are short (~10-40s without retries), so this default holds up under light/moderate throttle; under heavy throttle, see [Limitations](#limitations-and-out-of-scope) and consider bumping. |
 
 ### Synthesis
 
@@ -197,23 +224,15 @@ Exit codes:
 stream-eval synthesis \
     --eval evals/dsc-scrape/synthesis-eval.json \
     --skill-path skills/dsc-scrape \
-    --runs 5 --workers 4 --timeout 240 \
+    --runs 5 --workers 4 --timeout 600 \
     --out evals/dsc-scrape/runs/iteration-N/results.json
 ```
 
-Same shape as trigger. These flags differ:
-
 | Flag | Default | Description |
 |---|---|---|
-| `--skill-path` | optional | Path to the skill directory. Required for the `isolated` profile (default). If omitted, skill name falls back to the `--eval` JSON's parent directory name. |
-| `--skill-name` | from `SKILL.md` or eval path | Override the skill name. |
-| `--runs` | 5 | Higher than trigger because assertion failures can be noisy. |
-| `--timeout` | 240 | Lower than trigger because synthesis runs are typically shorter. |
+| `--runs` | `5` | Higher than trigger because assertion failures can be noisy. |
+| `--timeout` | `600` | Per-run wall-clock backstop. Counts retry-backoff time, same as trigger. Synthesis runs without retries are typically a few minutes; the 10-minute default leaves room for a couple of retries before retry-budget-exhaustion has a chance to fire. Under heavier throttle, bump it (or run fewer workers); see [Limitations](#limitations-and-out-of-scope). |
 | `--lenient` | off | Pass if majority of runs pass. Default is strict (every run must pass every assertion). |
-
-Synthesis additionally retains per-run stream-json transcripts at `runs/<iteration>/transcripts/<out-stem>/<fixture>-<N>.jsonl` for offline debugging. Trigger runs use a tempfile that's unlinked after scoring.
-
-Exit code 2 is unique to synthesis: fixture schema error (returned before any runs spawn). Otherwise the codes match trigger.
 
 ### Profiles
 
@@ -246,13 +265,15 @@ stream-eval monitor serve --open
 
 What it shows:
 
-- **Per-(skill, kind) skill rows.** A skill running both trigger and synthesis in parallel renders as two rows.
-- **Segmented progress bar.** One cell per `(fixture, run)`. Green = pass, red = fail, gray = pending. Pass/fail colors come from the runner's `pass=` field on the canonical stderr line.
-- **Active subprocess table.** Per-worker runtime, total api_retry events, latest attempt N/M, last error.
-- **Recent completions table.** Last 5 completed runs per skill row, with elapsed + retry counts + first 80 chars of query.
+- **Per-eval rows, keyed by `(skill, kind, harness pid)`.** Two concurrent evals of the same skill+kind get distinct rows; the harness pid in the header lets you tell them apart.
+- **Status state machine.** Each row is `active` / `completed` / `aborted` / `unknown`. Sort order: active first, then youngest-first within each status bucket.
+- **Segmented progress bar.** One cell per `(fixture, run)`. Green = pass, red = fail, pulsing gray = in-flight, light gray = pending. Yellow outline = worktree-contaminated (pass verdict unaudited).
+- **Inline Active Workers table** (collapsible, expanded by default). Per active row: claude pid, fixture, run, started, retries, attempt N/M, last error.
+- **Inline Recent Completions table** (collapsible). Last 5 cells per row.
+- **Per-row worker controls.** `+1`/`-1`/pause/resume buttons on each active row talk to that harness's Unix socket. Disabled when no live socket. A `running`/`paused` badge surfaces dispatcher state.
 - **Session scoping.** The dashboard pins to one Claude Code session at a time. Layered detection: explicit `--session` flag, then this dashboard's own bash parent's `.output` file, then any live trigger/synthesis worker's bash parent, then the youngest few `.output` files globally.
-- **JS polling.** 5s when active runs exist, 30s when idle, pauses after ~3 min of no change. Click "refresh now" to resume.
-- **Read-only.** The dashboard never spawns runs or writes anything except the HTTP responses. Safe to start/stop mid-eval.
+- **Configurable polling.** Default 5s when active runs exist, 30s when idle (override via inputs in the dashboard header or `STREAM_EVAL_POLL_*_MS` env). Auto-pauses after ~3 min of no change; click "refresh now" or change an interval to resume.
+- **Persistent UI state.** Each `<details>` block's open/closed state persists across re-renders via localStorage.
 
 Stop with Ctrl-C. The monitor process is decoupled from in-flight evals; restarting it doesn't affect them.
 
@@ -293,7 +314,7 @@ stream-eval fake all                           # every scenario, simultaneously
 
 Real operation has every state coexisting; pass several scenarios (comma-separated) or `all` to render them simultaneously. The single `full-spread` scenario is a curated subset (one of each state); `all` renders every scenario including the larger ones.
 
-The driver synthesizes the scenarios directly into `~/.claude/projects/stream-eval-fake-<id>/` so the dashboard's file walk picks them up, and blocks on Ctrl+C. Tear-down removes the directory and unlinks the fake sockets. (A symlink to a tempdir wouldn't work: `Path.rglob` on Python 3.13+ doesn't follow symlinks by default.)
+The driver synthesizes the scenarios directly into `~/.claude/projects/stream-eval-fake-<id>/` so the dashboard's file walk picks them up, and blocks on Ctrl+C. Tear-down removes the directory and unlinks the fake sockets.
 
 Programmatic use (tests, dev scripts):
 ```python
@@ -310,7 +331,7 @@ with make_fake_state(["concurrent", "over-cap", "legacy"]) as state:
     rows = build_state(state.output_paths, is_pid_alive=state.is_pid_alive).rows
 ```
 
-Scenarios cover: `active-clean`, `active-with-failures`, `active-with-contamination`, `concurrent`, `completed`, `aborted`, `aborted-no-finish-banner`, `legacy`, `over-cap`, `full-spread`. See `stream_eval/fake/runs.py` for builders -- adding a scenario is one function plus an entry in `SCENARIOS`.
+Scenarios cover: `active-clean`, `active-with-failures`, `active-with-contamination`, `concurrent`, `completed`, `aborted`, `aborted-no-finish-banner`, `legacy`, `over-cap`, `full-spread`. See `stream_eval/fake/runs.py` for builders – adding a scenario is one function plus an entry in `SCENARIOS`.
 
 ## Configuration via `.env`
 
@@ -318,8 +339,8 @@ The harnesses read configuration from `.env` at the repo root (gitignored) via `
 
 | Variable | Default | Description |
 |---|---|---|
-| `STREAM_EVAL_MODEL` | `sonnet` | Model identifier passed to `claude -p --model`. Pin an exact identifier (e.g. `claude-sonnet-4-6`) rather than the `sonnet` alias if your CLI's alias resolution doesn't target the version you want -- some deployments resolve `sonnet` to an older release. (Renamed from `DSC_EVAL_MODEL`.) |
-| `STREAM_EVAL_PROFILE` | `isolated` | Toolbelt profile (`isolated`, `restricted`, or `inherit`) for spawned `claude -p` subprocesses. (Renamed from `DSC_EVAL_PROFILE`; previous `default` profile renamed to `inherit`.) |
+| `STREAM_EVAL_MODEL` | `sonnet` | Model identifier passed to `claude -p --model`. Pin an exact identifier (e.g. `claude-sonnet-4-6`) rather than the `sonnet` alias if your CLI's alias resolution doesn't target the version you want – some deployments resolve `sonnet` to an older release. |
+| `STREAM_EVAL_PROFILE` | `isolated` | Toolbelt profile (`isolated`, `restricted`, or `inherit`) for spawned `claude -p` subprocesses. |
 | `STREAM_EVAL_OUTPUT_LIMIT` | `100` | Maximum `.output` files the dashboard parses on each refresh, ranked by mtime descending. Bump it if a slow active eval whose mtime falls outside the top-N starts disappearing mid-run. |
 | `STREAM_EVAL_PER_SKILL_CAP` | `5` | Per-(skill, kind) row cap. Active rows always bypass the cap; older completed/aborted rows are hidden once the cap is reached. Set to `0` to disable. |
 | `STREAM_EVAL_POLL_ACTIVE_MS` | `5000` | Default dashboard poll interval when active runs exist. Operators can override per-tab via the input at the top-right; the override persists in localStorage. |
@@ -349,13 +370,10 @@ Iteration notes can cite this directly so eval numbers stay correlatable across 
 
 ## Limitations and out-of-scope
 
-- **Sequential dashboard binding for finished runs.** A skill's finished `.output` file is bound to `(skill, kind)` via the runner's startup banner, which means pre-rename `.output` files (from the probe-eval era) don't surface. They're not deleted; they just fall through silently.
-- **No backward compatibility with `skill-creator:run_eval.py` fixture format.** The shapes are different.
 - **Single-host only.** No multi-machine eval distribution.
-- **Synthesis fixtures are not auto-discoverable.** Each skill that wants synthesis coverage authors its own `synthesis-eval.json`. Trigger-evals can be run against any installed skill without authoring synthesis fixtures.
 - **The dashboard is single-session-pinned.** Two parallel Claude Code sessions each running their own evals appear in two separate dashboards; cross-session aggregation is not supported.
-- **Throughput is gateway-limited.** Running with `--workers 4` against an unloaded gateway is roughly 4x of `--workers 1`; against a loaded gateway, gateway throttle dominates and `--workers 2` may match `--workers 4` at lower retry frequency. The dashboard surfaces retry events; treat high retry rates as a signal to lower workers.
-- **`total_fixtures` from the startup banner is not yet plumbed into the live progress-bar sizing.** The dashboard derives bar width from observed `(fixture_id, run)` pairs as they arrive; the banner field is parsed and bound but not yet used to pre-size the bar. Pre-sizing is queued as a follow-up so the bar's denominator settles immediately rather than growing across the first sweep.
+- **Throughput is upstream-limited.** Running with `--workers 4` against an unloaded API endpoint is roughly 4x of `--workers 1`; against a loaded one, throttle dominates and `--workers 2` may match `--workers 4` at lower retry frequency. The dashboard surfaces retry events; treat high retry rates as a signal to lower workers.
+- **Wall-clock `--timeout` counts retry-backoff time, and that interacts badly with the api_retry-exhaustion bail.** When the upstream throttles, the CLI retries with backoff – we've observed starting waits around 60s, but the full schedule (whether it caps, plateaus, or grows further) is internal to the CLI and we haven't characterized it. What we do know: a sustained throttle storm can blow trigger's 1800s default before retry 10 is reached; synthesis's default was previously 240s and could blow up after a single retry, which is why we bumped it to 600s as a stopgap until the retry-aware fix lands. Two consequences. **First, ambiguous failure mode:** a run that wall-clocks out under load could be a stuck skill (model in a tool-use loop) or just heavy throttle, and the harness reports the same `wall_timed_out=True` for both. **Second, signal stomping:** the api_retry-exhaustion bail (`attempt == max_retries`) is supposed to be the principled signal for "give up, upstream is poisoned" – but the wall clock fires before retry 10 is reached under realistic throttle, pre-empting that cleaner signal and reporting wall-clock-failure where exhaustion would have been the right verdict. The honest fix is to make the wall clock retry-aware: subtract retry-backoff time from the deadline so it reflects model-thinking time only, leaving api_retry-exhaustion as the clean throttle-bail signal. Until that lands, the operator workaround under heavy throttle is to bump `--timeout` generously enough that retry-budget-exhaustion can fire first. If iteration baselines start showing systematic wall-clock failures correlated with API load, this is the place to look.
 
 ## License
 
