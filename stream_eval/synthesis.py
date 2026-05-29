@@ -252,7 +252,10 @@ def main(argv=None):
                     help="Pass if majority of runs pass (default: strict -- "
                          "all runs must pass)")
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--timeout", type=int, default=300,
+                    help="Per-run wall-clock backstop in seconds "
+                         "(default 300). Measures effective model-thinking "
+                         "time only -- retry-backoff windows are excluded.")
     ap.add_argument("--cwd", default=None)
     ap.add_argument(
         "--profile", choices=["isolated", "restricted", "inherit"],

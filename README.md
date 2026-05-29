@@ -209,14 +209,14 @@ Exit codes are also shared:
 stream-eval trigger \
     --eval evals/dsc-endpoint-help/trigger-eval.json \
     --skill-path skills/dsc-endpoint-help \
-    --runs 3 --workers 4 --timeout 1800 \
+    --runs 3 --workers 4 --timeout 300 \
     --out evals/dsc-endpoint-help/runs/iteration-N/results.json
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--runs` | `3` | Runs per fixture. |
-| `--timeout` | `1800` | Per-run wall-clock backstop, in seconds. Measures effective model-thinking time only -- retry-backoff windows are excluded from the deadline. The default is generous for trigger runs (typically 10-40s without retries); under heavy throttle, retry-budget-exhaustion fires first via the api_retry signal. |
+| `--timeout` | `300` | Per-run wall-clock backstop, in seconds. Measures effective model-thinking time only -- retry-backoff windows are excluded from the deadline. Trigger runs are typically 10-40s of effective thinking, so 5 minutes is generous; under heavy throttle, retry-budget-exhaustion fires first via the api_retry signal. |
 
 ### Synthesis
 
@@ -224,14 +224,14 @@ stream-eval trigger \
 stream-eval synthesis \
     --eval evals/dsc-scrape/synthesis-eval.json \
     --skill-path skills/dsc-scrape \
-    --runs 5 --workers 4 --timeout 600 \
+    --runs 5 --workers 4 --timeout 300 \
     --out evals/dsc-scrape/runs/iteration-N/results.json
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--runs` | `5` | Higher than trigger because assertion failures can be noisy. |
-| `--timeout` | `600` | Per-run wall-clock backstop. Same retry-aware semantics as trigger (retry-backoff time excluded). Synthesis runs without retries are typically a few minutes; the 10-minute default of effective thinking time is generous. Under heavy throttle, retry-budget-exhaustion fires first. |
+| `--timeout` | `300` | Per-run wall-clock backstop. Same retry-aware semantics as trigger (retry-backoff time excluded). Synthesis runs are typically 2-3 minutes of effective thinking; 5 minutes is generous. Under heavy throttle, retry-budget-exhaustion fires first. |
 | `--lenient` | off | Pass if majority of runs pass. Default is strict (every run must pass every assertion). |
 
 ### Profiles

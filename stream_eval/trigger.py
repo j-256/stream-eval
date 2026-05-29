@@ -41,7 +41,7 @@ Usage:
   stream-eval trigger \\
     --eval evals/dsc-endpoint-help/trigger-eval.json \\
     --skill-name dsc-endpoint-help \\
-    --runs 3 --workers 4 --timeout 1800 \\
+    --runs 3 --workers 4 --timeout 300 \\
     --out evals/dsc-endpoint-help/runs/iteration-N/results.json
 """
 import argparse
@@ -170,10 +170,11 @@ def main(argv=None):
                          "SKILL.md frontmatter when --skill-path is given.")
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--timeout", type=int, default=1800,
-                    help="Absolute wall-clock backstop in seconds (default "
-                         "1800). Primary bail signal is api_retry budget "
-                         "exhaustion; this only fires for a hung process.")
+    ap.add_argument("--timeout", type=int, default=300,
+                    help="Per-run wall-clock backstop in seconds "
+                         "(default 300). Measures effective model-thinking "
+                         "time only -- retry-backoff windows are excluded. "
+                         "Primary bail signal is api_retry budget exhaustion.")
     ap.add_argument("--cwd", default=None,
                     help="CWD for claude -p subprocesses (default: current dir)")
     ap.add_argument(
