@@ -383,3 +383,66 @@ def test_build_state_carries_contaminated_flag(tmp_path):
     assert contam[0].fixture_id == "q0"
     assert len(clean) == 1
     assert clean[0].fixture_id == "q1"
+
+
+def test_build_state_extracts_started_at_from_banner(tmp_path):
+    """The startup banner stamps started_at as a unix timestamp;
+    build_state must surface it on DashboardRow.started_at so the
+    dashboard can render runtime without filesystem heuristics."""
+    p = tmp_path / "session-ts.output"
+    p.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=1 workers=2 "
+        "total_fixtures=1 pid=44444 started_at=1780000000.500 ===\n"
+        "[1/1] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+    )
+    state = build_state([p], is_pid_alive=lambda pid: True)
+    assert len(state.rows) == 1
+    assert state.rows[0].started_at == 1780000000.500
+
+
+def test_build_state_extracts_finished_at_from_finish_banner(tmp_path):
+    """Finish banner's finished_at must reach DashboardRow.finished_at,
+    and only on rows whose verdict came from the finish banner (active
+    rows have no finished_at)."""
+    p = tmp_path / "session-ts2.output"
+    p.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=1 workers=2 "
+        "total_fixtures=1 pid=55555 started_at=1780000000.000 ===\n"
+        "[1/1] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+        "=== eval finished: kind=trigger skill=dsc-scrape pid=55555 "
+        "verdict=completed finished_at=1780000300.250 ===\n"
+    )
+    state = build_state([p], is_pid_alive=lambda pid: False)
+    assert len(state.rows) == 1
+    row = state.rows[0]
+    assert row.status == "completed"
+    assert row.started_at == 1780000000.000
+    assert row.finished_at == 1780000300.250
+
+
+def test_build_state_legacy_banner_without_started_at(tmp_path):
+    """A .output file written before the timestamp field still parses;
+    started_at is None on the resulting row."""
+    p = tmp_path / "session-legacy-ts.output"
+    p.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=1 workers=2 "
+        "total_fixtures=1 pid=66666 ===\n"
+        "[1/1] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+    )
+    state = build_state([p], is_pid_alive=lambda pid: True)
+    assert len(state.rows) == 1
+    assert state.rows[0].started_at is None
+    assert state.rows[0].finished_at is None
+

@@ -57,11 +57,15 @@ class DashboardRow:
     # Mtime of the source .output file -- used to break ties when more
     # than the per-skill cap of completed rows survives the window.
     mtime: float = 0.0
-    # Ctime of the source .output file. Approximates the harness's
-    # start time -- the runner creates the file immediately after the
-    # tee installs. Used by the stop-confirmation modal to render
-    # "running for X minutes" without parsing the banner timestamp.
-    ctime: float = 0.0
+    # Unix timestamps from the startup / finish banners. None for legacy
+    # .output files written before the banners stamped these. Preferred
+    # over filesystem ctime/mtime for runtime calculations because ctime
+    # semantics differ across platforms (macOS = creation, Linux =
+    # inode-change). The dashboard renders elapsed-since-start from
+    # started_at, total runtime from finished_at - started_at on
+    # completed rows.
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
 
 
 @dataclass
@@ -99,19 +103,19 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
     if is_pid_alive is None:
         is_pid_alive = _default_is_pid_alive
     rows_by_key = {}
-    finish_verdicts = {}
+    # (skill, kind, pid) -> {"verdict": str, "finished_at": Optional[float]}.
+    # Both fields come from the finish banner; finished_at is None for
+    # legacy banners written before that field existed.
+    finish_info = {}
     for path in output_paths:
         try:
             text = Path(path).read_text(errors="replace")
         except OSError:
             continue
         try:
-            stat = Path(path).stat()
-            mtime = stat.st_mtime
-            ctime = stat.st_ctime
+            mtime = Path(path).stat().st_mtime
         except OSError:
             mtime = 0.0
-            ctime = 0.0
         current_key = None
         for line in text.splitlines():
             banner = parse_startup_banner(line)
@@ -126,16 +130,20 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
                         runs=banner["runs"],
                         harness_pid=banner["pid"],
                         mtime=mtime,
-                        ctime=ctime,
+                        started_at=banner["started_at"],
                     ),
                 )
                 row.total_fixtures = banner["total_fixtures"]
                 row.runs = banner["runs"]
                 row.mtime = max(row.mtime, mtime)
-                # ctime: keep the earliest -- the file's original
-                # creation time, even if multiple banners (rare).
-                if row.ctime == 0.0 or (ctime > 0 and ctime < row.ctime):
-                    row.ctime = ctime
+                # started_at: keep the earliest, even if multiple
+                # banners (rare; would happen if a single .output file
+                # was reused across two harness runs).
+                if banner["started_at"] is not None and (
+                    row.started_at is None
+                    or banner["started_at"] < row.started_at
+                ):
+                    row.started_at = banner["started_at"]
                 current_key = key
                 continue
 
@@ -145,9 +153,10 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
                 # can't reconstruct the full key here. Index by
                 # (skill, kind, pid); for legacy/no-pid rows we won't
                 # see a finish banner anyway.
-                finish_verdicts[(finish["skill"], finish["kind"], finish["pid"])] = (
-                    finish["verdict"]
-                )
+                finish_info[(finish["skill"], finish["kind"], finish["pid"])] = {
+                    "verdict": finish["verdict"],
+                    "finished_at": finish["finished_at"],
+                }
                 continue
 
             prog = parse_progress_line(line)
@@ -162,7 +171,6 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
                     total_fixtures=0, runs=0,
                     harness_pid=current_key[2],
                     mtime=mtime,
-                    ctime=ctime,
                 ),
             )
             row.cells.append(DashboardCell(
@@ -173,9 +181,11 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
             ))
 
     for key, row in rows_by_key.items():
-        verdict = finish_verdicts.get(key)
+        finish = finish_info.get(key)
+        verdict = finish["verdict"] if finish else None
         if verdict in ("completed", "aborted"):
             row.status = verdict
+            row.finished_at = finish["finished_at"]
         elif row.harness_pid is None:
             row.status = "unknown"
         elif is_pid_alive(row.harness_pid):

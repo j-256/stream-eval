@@ -312,6 +312,53 @@ class TestStartupBanner(unittest.TestCase):
         )
         self.assertIsNone(STARTUP_BANNER_RE.search(embedded))
 
+    def test_banner_includes_started_at_timestamp(self):
+        """New banners stamp started_at as a unix timestamp -- the
+        dashboard's runtime indicator reads this rather than file
+        ctime/mtime, which has portability problems
+        (st_ctime: macOS=creation, Linux=inode-change)."""
+        line = format_startup_banner(
+            kind="trigger", skill="dsc-scrape",
+            eval_path="evals/dsc-scrape/trigger-eval.json",
+            runs=1, workers=1, total_fixtures=1, pid=42,
+            started_at=1780_000_000.123,
+        )
+        m = STARTUP_BANNER_RE.search(line)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("started_at"), "1780000000.123")
+
+    def test_banner_started_at_defaults_to_now(self):
+        """When called without started_at, format_startup_banner stamps
+        time.time() so callers don't have to remember.
+
+        The banner formats with millisecond precision (%.3f); allow a
+        2ms tolerance on the bounds-check to absorb the rounding."""
+        import time
+        before = time.time()
+        line = format_startup_banner(
+            kind="trigger", skill="x",
+            eval_path="e.json",
+            runs=1, workers=1, total_fixtures=1, pid=1,
+        )
+        after = time.time()
+        m = STARTUP_BANNER_RE.search(line)
+        self.assertIsNotNone(m)
+        ts = float(m.group("started_at"))
+        self.assertGreaterEqual(ts, before - 0.002)
+        self.assertLessEqual(ts, after + 0.002)
+
+    def test_banner_legacy_form_without_started_at_still_parses(self):
+        """Banners written before the started_at field still parse;
+        groupdict()['started_at'] is None for those."""
+        legacy = (
+            "=== eval starting: kind=trigger skill=dsc-scrape "
+            "eval=evals/dsc-scrape/trigger-eval.json "
+            "runs=3 workers=4 total_fixtures=10 pid=42 ==="
+        )
+        m = STARTUP_BANNER_RE.search(legacy)
+        self.assertIsNotNone(m)
+        self.assertIsNone(m.group("started_at"))
+
 
 class TestFinishBanner(unittest.TestCase):
     def test_finish_completed_round_trips(self):
@@ -349,6 +396,29 @@ class TestFinishBanner(unittest.TestCase):
             "runs=3 workers=4 total_fixtures=10 pid=42 ==="
         )
         self.assertIsNone(FINISH_BANNER_RE.search(startup))
+
+    def test_finish_includes_finished_at_timestamp(self):
+        """Finish banner stamps finished_at -- the dashboard pairs it
+        with started_at on the startup banner to render total runtime
+        on completed/aborted rows."""
+        line = format_finish_banner(
+            kind="trigger", skill="x", verdict="completed", pid=42,
+            finished_at=1780_000_300.456,
+        )
+        m = FINISH_BANNER_RE.search(line)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("finished_at"), "1780000300.456")
+
+    def test_finish_legacy_form_without_finished_at_still_parses(self):
+        """Banners written before the finished_at field still parse;
+        groupdict()['finished_at'] is None for those."""
+        legacy = (
+            "=== eval finished: kind=trigger skill=x "
+            "pid=42 verdict=completed ==="
+        )
+        m = FINISH_BANNER_RE.search(legacy)
+        self.assertIsNotNone(m)
+        self.assertIsNone(m.group("finished_at"))
 
 
 import tempfile

@@ -14,6 +14,25 @@
     {% set total = row.total_fixtures * row.runs %}
     {% set passed = row.cells | selectattr('pass_', 'equalto', true) | list | length %}
     <span class="qpass">{{ passed }}/{{ total }} pass</span>
+    {# Runtime indicator. Active rows show "running Xm" relative to now;
+       completed/aborted rows show "ran Xm" relative to when the finish
+       banner stamped finished_at. Hidden when started_at is unknown
+       (legacy .output files). #}
+    {% if row.started_at %}
+      {% if row.status == "active" and now %}
+        {% set _runtime_s = now - row.started_at %}
+        <span class="runtime"
+              title="started {{ row.started_at | int }}">
+          running {{ (_runtime_s // 60) | int }}m
+        </span>
+      {% elif row.finished_at %}
+        {% set _runtime_s = row.finished_at - row.started_at %}
+        <span class="runtime"
+              title="started {{ row.started_at | int }}, finished {{ row.finished_at | int }}">
+          ran {{ (_runtime_s // 60) | int }}m
+        </span>
+      {% endif %}
+    {% endif %}
   </div>
   <div class="bar">
     {% for cell in row.cells %}
@@ -65,7 +84,12 @@
     {% set done = row.cells | length %}
     {% set total = row.total_fixtures * row.runs %}
     {% set remaining = total - done %}
-    {% set elapsed_s = (now - row.ctime) if (row.ctime and now) else 0 %}
+    {# Prefer started_at from the banner (portable, explicit). Fall back
+       to file mtime for legacy .output files that pre-date the banner
+       timestamp; mtime drifts forward as new lines are appended, so
+       it's a fuzzy lower bound on runtime, but better than zero. #}
+    {% set start_ts = row.started_at if row.started_at else row.mtime %}
+    {% set elapsed_s = (now - start_ts) if (start_ts and now) else 0 %}
     {% set elapsed_m = (elapsed_s // 60) | int %}
     <dialog id="stop-dialog-{{ row.harness_pid }}" class="confirm-dialog">
       <form method="post" action="{{ url_for('workers_stop', pid=row.harness_pid) }}">

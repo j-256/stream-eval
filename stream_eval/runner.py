@@ -270,6 +270,10 @@ STARTUP_BANNER_RE = re.compile(
     # pid= is optional so the regex still parses banners written before
     # F.5 added per-eval pid routing. New runs always include it.
     r"(?:\s+pid=(?P<pid>\d+))?"
+    # started_at= unix timestamp. Optional for the same back-compat
+    # reason: pre-feature .output files still on disk parse fine, just
+    # without the timestamp. Float so subsecond precision survives.
+    r"(?:\s+started_at=(?P<started_at>[\d.]+))?"
     r"\s*==="
 )
 
@@ -285,11 +289,15 @@ FINISH_BANNER_RE = re.compile(
     r"skill=(?P<skill>\S+)\s+"
     r"pid=(?P<pid>\d+)\s+"
     r"verdict=(?P<verdict>completed|aborted)"
+    # finished_at= unix timestamp. Optional for back-compat with .output
+    # files written before the field existed.
+    r"(?:\s+finished_at=(?P<finished_at>[\d.]+))?"
     r"\s*==="
 )
 
 
-def format_finish_banner(*, kind, skill, verdict, pid=None):
+def format_finish_banner(*, kind, skill, verdict, pid=None,
+                         finished_at=None):
     """The runner emits this to stderr after the last task finishes.
 
     verdict is "completed" if every dispatched task scored (pass or
@@ -297,20 +305,30 @@ def format_finish_banner(*, kind, skill, verdict, pid=None):
     Ctrl-C). The dashboard pairs this with the startup banner to label
     the row's status; without it, the dashboard would have to rely on
     pid-still-alive, which races against fast harness exits.
+
+    finished_at is the unix timestamp (defaulting to time.time()) of
+    when the run finished. Paired with started_at on the startup banner
+    so the dashboard can render absolute and relative times without
+    relying on file ctime/mtime, which is unreliable cross-platform
+    (st_ctime is "creation time" on macOS but "inode change time" on
+    Linux).
     """
     if pid is None:
         pid = os.getpid()
+    if finished_at is None:
+        finished_at = time.time()
     return (
         f"=== eval finished: "
         f"kind={kind} "
         f"skill={skill} "
         f"pid={pid} "
-        f"verdict={verdict} ==="
+        f"verdict={verdict} "
+        f"finished_at={finished_at:.3f} ==="
     )
 
 
 def format_startup_banner(*, kind, skill, eval_path, runs, workers,
-                          total_fixtures, pid=None):
+                          total_fixtures, pid=None, started_at=None):
     """The runner emits this to stderr before the first task completes.
 
     stream_eval.monitor parses it from each .output file to bind finished
@@ -319,9 +337,17 @@ def format_startup_banner(*, kind, skill, eval_path, runs, workers,
     before any rows have arrived. pid identifies the harness process so
     each row's worker-control buttons route to its own /tmp/stream-eval-
     <pid>.sock; defaults to os.getpid() so callers don't have to pass it.
+
+    started_at is the unix timestamp (defaulting to time.time()) of when
+    the harness started. The dashboard renders runtime from this rather
+    than file ctime/mtime, which is unreliable cross-platform
+    (st_ctime is "creation time" on macOS but "inode change time" on
+    Linux -- the timestamp would silently shift on every chmod/rename).
     """
     if pid is None:
         pid = os.getpid()
+    if started_at is None:
+        started_at = time.time()
     return (
         f"=== eval starting: "
         f"kind={kind} "
@@ -330,7 +356,8 @@ def format_startup_banner(*, kind, skill, eval_path, runs, workers,
         f"runs={runs} "
         f"workers={workers} "
         f"total_fixtures={total_fixtures} "
-        f"pid={pid} ==="
+        f"pid={pid} "
+        f"started_at={started_at:.3f} ==="
     )
 
 

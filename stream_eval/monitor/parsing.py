@@ -52,12 +52,17 @@ def parse_startup_banner(line):
     The `pid` field is None for legacy banners written before F.5 added
     per-eval pid routing; the dashboard treats those rows as 'unknown'
     status (no live controls).
+
+    `started_at` is None for legacy banners that pre-date the timestamp
+    field. New banners always carry it. Float seconds since the unix
+    epoch.
     """
     m = _STARTUP_BANNER_RE.search(line)
     if not m:
         return None
     g = m.groupdict()
     pid_str = g.get("pid")
+    started_at_str = g.get("started_at")
     return {
         "kind": g["kind"],
         "skill": g["skill"],
@@ -66,6 +71,7 @@ def parse_startup_banner(line):
         "workers": int(g["workers"]),
         "total_fixtures": int(g["total_fixtures"]),
         "pid": int(pid_str) if pid_str else None,
+        "started_at": float(started_at_str) if started_at_str else None,
     }
 
 
@@ -77,14 +83,19 @@ def parse_finish_banner(line):
     to 'completed' or 'aborted'. Older .output files written before
     F.5 introduced this banner won't have one; rows from those files
     fall through to liveness-based status inference.
+
+    `finished_at` is None for legacy banners that pre-date the
+    timestamp field. Float seconds since the unix epoch.
     """
     m = _FINISH_BANNER_RE.search(line)
     if not m:
         return None
     g = m.groupdict()
+    finished_at_str = g.get("finished_at")
     return {
         "kind": g["kind"],
         "skill": g["skill"],
         "pid": int(g["pid"]),
         "verdict": g["verdict"],
+        "finished_at": float(finished_at_str) if finished_at_str else None,
     }
