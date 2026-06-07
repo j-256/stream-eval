@@ -183,6 +183,82 @@ def test_dispatcher_pause_blocks_new_spawns_resume_unblocks():
     assert len(completed) == 5
 
 
+def test_dispatcher_cancel_pending_filters_by_predicate():
+    """cancel_pending(pred) removes pending tasks where pred is truthy.
+    Returns the count cancelled. In-flight workers are not touched."""
+    d = Dispatcher(
+        target_workers=0,  # don't spawn yet -- everything stays pending
+        spawn_worker=lambda t: FakeWorker(t, duration=0.01),
+    )
+    d.submit({"fixture_id": "alpha", "run": 1})
+    d.submit({"fixture_id": "alpha", "run": 2})
+    d.submit({"fixture_id": "beta", "run": 1})
+    d.submit({"fixture_id": "beta", "run": 2})
+    d.submit({"fixture_id": "gamma", "run": 1})
+
+    cancelled = d.cancel_pending(
+        lambda t: t["fixture_id"] == "beta"
+    )
+
+    assert cancelled == 2
+    # Run the rest to verify only non-beta tasks executed.
+    d.target_workers = 2
+    d.run_until_complete(timeout=2)
+    completed = list(d.drain_completed())
+    fids = sorted(c["task"]["fixture_id"] for c in completed)
+    assert fids == ["alpha", "alpha", "gamma"]
+
+
+def test_dispatcher_cancel_pending_zero_when_no_match():
+    d = Dispatcher(
+        target_workers=0,
+        spawn_worker=lambda t: FakeWorker(t, duration=0.01),
+    )
+    d.submit({"fixture_id": "alpha"})
+    cancelled = d.cancel_pending(lambda t: t["fixture_id"] == "nonexistent")
+    assert cancelled == 0
+    # alpha must still be runnable.
+    d.target_workers = 1
+    d.run_until_complete(timeout=2)
+    completed = list(d.drain_completed())
+    assert len(completed) == 1
+
+
+def test_dispatcher_cancel_pending_does_not_touch_active():
+    """In-flight workers continue to completion even after their fixture
+    is cancelled from the pending queue."""
+    d = Dispatcher(
+        target_workers=1,
+        spawn_worker=lambda t: FakeWorker(t, duration=0.1),
+    )
+    d.submit({"fixture_id": "alpha", "run": 1})
+    d.submit({"fixture_id": "alpha", "run": 2})
+
+    runner_thread = threading.Thread(
+        target=lambda: d.run_until_complete(timeout=2), daemon=True,
+    )
+    runner_thread.start()
+
+    # Wait for alpha-1 to start running.
+    for _ in range(50):
+        if _active_count(d) >= 1:
+            break
+        time.sleep(0.005)
+
+    # Cancel alpha's pending tasks (alpha-2 is still in pending). The
+    # active alpha-1 must NOT be killed; it runs to completion.
+    cancelled = d.cancel_pending(
+        lambda t: t["fixture_id"] == "alpha"
+    )
+    assert cancelled == 1, "alpha-2 should be the only pending alpha task"
+
+    runner_thread.join(timeout=2)
+    completed = list(d.drain_completed())
+    # Only alpha-1 ran; alpha-2 was cancelled mid-flight.
+    assert len(completed) == 1
+    assert completed[0]["task"]["run"] == 1
+
+
 def test_dispatcher_stop_breaks_run_loop_promptly():
     """stop() must transition the dispatcher to STOPPED so that
     run_until_complete exits on its next poll cycle. This is the

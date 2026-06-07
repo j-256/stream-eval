@@ -197,9 +197,13 @@ def score_synthesis_run(fixture, transcript_path, bail):
     Receives the fixture, the path to the (already-written) transcript,
     and the bail dict. Returns (pass: bool, kind_extra: dict).
 
-    On timed-out runs the runner doesn't call this -- a timed-out run
-    is auto-failed in _run_one_task. So we don't need to handle the
-    bail-flagged case here; we always have a parseable transcript.
+    Called on every run including timed-out ones -- a timeout tells us
+    about runtime, not about whether assertions hold against whatever
+    transcript the partial run produced. The runner forces pass_=False
+    on timeouts regardless; running here on timeouts preserves
+    first_tool / first_skill / assertion_results in kind_extra. Partial
+    transcripts may have no final result event, so assertions like
+    final_text_matches will simply fail to non-match rather than error.
 
     kind_extra carries first_tool + first_skill so the runner can
     surface them on the canonical stderr line; assertion_results +

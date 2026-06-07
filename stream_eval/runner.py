@@ -781,9 +781,12 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
         "wall_clock", or None
       - transcript_path (str | None): persisted path when transcript_dir
         was supplied, else None (tempfile already unlinked)
-      - pass_ (bool): score_run's pass verdict; auto-False on timeout
-      - kind_extra (dict): score_run's free-form per-run payload; empty
-        on timeout
+      - pass_ (bool): score_run's pass verdict; forced False on timeout
+        regardless of what scoring returned
+      - kind_extra (dict): score_run's free-form per-run payload. Now
+        populated even on timeouts so first_tool / first_skill /
+        assertion_results survive partial runs; empty only if score_run
+        raised.
       - worktree_contaminated (bool): True if the spawn left the
         worktree dirtier than it found it (eval-Sonnet edited source).
         A contaminated run's pass_ is unaudited regardless of value --
@@ -824,10 +827,20 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
         else:
             timeout_reason = None
 
-        if timed_out:
-            pass_, kind_extra = False, {}
-        else:
+        # Score even on timed-out runs so kind_extra (first_tool,
+        # first_skill, assertion_results) is preserved -- a timeout tells
+        # us about runtime, not about whether the skill triggered or what
+        # the partial transcript shows. The run still counts as a failure
+        # (pass_ is forced False below), but the trigger/synthesis signal
+        # is recoverable from kind_extra without re-reading transcripts.
+        # Scorers must tolerate transcripts that may be truncated mid-run
+        # (no final result event, partial tool_use chain).
+        try:
             pass_, kind_extra = score_run(fixture, transcript_path, bail)
+        except Exception:
+            pass_, kind_extra = False, {}
+        if timed_out:
+            pass_ = False
 
         return {
             "fixture_id": fixture_id,
@@ -1058,6 +1071,13 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
     t0 = time.time()
     done = 0
     aborted_on_timeout = False
+    # Tasks cancelled by per-fixture wall-clock skip. Bumped into `done`
+    # so the loop terminates without these ever running -- they're not
+    # "missing data", they're "skipped because their fixture made the
+    # model think too long once already." Tracked separately for the
+    # final summary.
+    skipped_for_fixture_timeout = 0
+    skipped_fixtures = set()
 
     def _spawn(kwargs):
         return _SubprocessWorker(task=kwargs, kwargs=kwargs)
@@ -1156,33 +1176,69 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
                     print(msg, file=sys.stderr)
 
                 if r["timed_out"]:
-                    aborted_on_timeout = True
-                    cause = (
-                        "CLI's retry budget exhausted (upstream-poisoned signal)"
-                        if r["timeout_reason"] == "retry_budget_exhausted"
-                        else "absolute wall clock exceeded"
+                    # Two kinds of timeout, two policies:
+                    #
+                    # `retry_budget_exhausted` and `wall_clock_in_retry`
+                    # are upstream-poisoned signals -- the CLI either
+                    # blew through its retry ceiling or got wedged inside
+                    # a retry sleep. Continuing past these mixes real
+                    # failures with throttle noise; abort the whole eval.
+                    #
+                    # `wall_clock` (without retry) is "the model thinks
+                    # too long on this prompt." Not a throttle signal; a
+                    # specific prompt's pathology. Skip the fixture's
+                    # remaining runs (they'd likely time out the same
+                    # way) and continue on other fixtures.
+                    upstream_poisoned = r["timeout_reason"] in (
+                        "retry_budget_exhausted",
+                        "wall_clock_in_retry",
                     )
-                    remaining = total - done
-                    print(
-                        f"\n=== ABORT: run {fixture_id}-{run_idx} timed out "
-                        f"-- {cause}. Cancelling remaining {remaining} runs. "
-                        "Continuing measurements after a budget-exhaustion "
-                        "event would mix real failures with throttle noise. "
-                        "Re-run when the upstream API has recovered.",
-                        file=sys.stderr,
+                    if upstream_poisoned:
+                        aborted_on_timeout = True
+                        cause = (
+                            "CLI's retry budget exhausted "
+                            "(upstream-poisoned signal)"
+                            if r["timeout_reason"] == "retry_budget_exhausted"
+                            else "wall clock exceeded inside retry-backoff "
+                            "(stuck-during-retry, likely throttle)"
+                        )
+                        remaining = total - done
+                        print(
+                            f"\n=== ABORT: run {fixture_id}-{run_idx} "
+                            f"timed out -- {cause}. Cancelling remaining "
+                            f"{remaining} runs. Continuing measurements "
+                            "after a budget-exhaustion event would mix "
+                            "real failures with throttle noise. Re-run "
+                            "when the upstream API has recovered.",
+                            file=sys.stderr,
+                        )
+                        # Stop the dispatcher cleanly: target_workers=0
+                        # blocks any further spawns, and stop()
+                        # transitions to STOPPED so the driver thread's
+                        # run_until_complete loop exits on its next
+                        # poll. pause() alone wouldn't do this.
+                        dispatcher.target_workers = 0
+                        dispatcher.stop()
+                        break
+                    # Per-fixture wall-clock skip. Cancel pending runs
+                    # for the same fixture_id; log the count.
+                    cancelled = dispatcher.cancel_pending(
+                        lambda task, fid=fixture_id:
+                            task.get("fixture_id") == fid
                     )
-                    # Stop the dispatcher cleanly: target_workers=0
-                    # blocks any further spawns, and stop() transitions
-                    # the state machine to STOPPED so the driver thread's
-                    # run_until_complete loop exits on its next poll
-                    # iteration (within ~poll_interval seconds). pause()
-                    # alone wouldn't do this -- pause keeps iterating
-                    # the reap loop and never reaches the done condition
-                    # because state==PAUSED inhibits the transition to
-                    # STOPPED.
-                    dispatcher.target_workers = 0
-                    dispatcher.stop()
-                    break
+                    if cancelled > 0:
+                        skipped_for_fixture_timeout += cancelled
+                        skipped_fixtures.add(fixture_id)
+                        # Bump done by cancelled count so the
+                        # `while done < total` loop terminates after
+                        # the surviving tasks finish.
+                        done += cancelled
+                        print(
+                            f"  ! WALL-CLOCK on {fixture_id}-{run_idx}: "
+                            f"skipping {cancelled} remaining run(s) for "
+                            "this fixture; eval continues",
+                            file=sys.stderr,
+                        )
 
             if aborted_on_timeout:
                 break
@@ -1213,8 +1269,14 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
         "total_fixtures": len(fixtures),
         "elapsed_seconds": round(elapsed, 1),
         "aborted_on_timeout": aborted_on_timeout,
+        # `completed_runs` counts both genuine completions and per-
+        # fixture skips (fixtures whose first run wall-clock-timed-out
+        # have their remaining runs cancelled). The `skipped_*` fields
+        # below break that down so consumers can tell the difference.
         "completed_runs": done,
         "total_runs_planned": total,
+        "skipped_runs_for_fixture_timeout": skipped_for_fixture_timeout,
+        "skipped_fixtures": sorted(skipped_fixtures),
         "contaminated_runs": contaminated_runs,
         "results": summary,
     }

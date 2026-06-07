@@ -115,11 +115,18 @@ def score_trigger_run(fixture, transcript_path, bail, *, target_skill):
     """Trigger-eval scoring callback for stream_eval.runner.run_eval.
 
     Receives the fixture, the path to the (already-written) transcript,
-    and the bail dict. The runner doesn't call this on timed-out runs.
+    and the bail dict. Called on every run including timed-out ones --
+    a timeout tells us about runtime, not whether the skill triggered.
+    The runner forces pass_=False on timeouts regardless of what we
+    return; the value of running here on timeouts is preserving
+    first_tool / first_skill in kind_extra so partial-run transcripts
+    don't lose their trigger signal.
 
     Returns (pass: bool, kind_extra: dict). pass=True iff the first
     tool_use in the transcript is the Skill tool with input matching
-    target_skill.
+    target_skill. If the transcript has no tool_use yet (e.g. timed out
+    before any tool fired), first_tool/first_skill are None and pass is
+    False.
     """
     first_tool = None
     first_skill = None

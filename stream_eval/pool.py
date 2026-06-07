@@ -184,3 +184,25 @@ class Dispatcher:
         """
         with self._lock:
             self._state = DispatcherState.STOPPED
+
+    def cancel_pending(self, predicate):
+        """Remove pending tasks where predicate(task) is truthy.
+
+        Does NOT touch in-flight workers -- they finish naturally. Used
+        by the harness's per-fixture skip path: when one run for a
+        fixture wall-clock-times-out, we skip the fixture's remaining
+        runs (predicate matches by fixture_id) but keep running other
+        fixtures. The signal is "this prompt makes the model think too
+        long," not "the upstream is poisoned" -- we want the eval to
+        keep going.
+
+        Returns the count of tasks cancelled. Unlike stop(), the
+        dispatcher state machine is unaffected; run_until_complete keeps
+        iterating until the (now smaller) pending queue plus active
+        workers drain.
+        """
+        with self._lock:
+            kept = deque(t for t in self._pending if not predicate(t))
+            cancelled = len(self._pending) - len(kept)
+            self._pending = kept
+            return cancelled

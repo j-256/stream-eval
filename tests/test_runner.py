@@ -539,7 +539,12 @@ class TestRunEvalAbortOnTimeout(unittest.TestCase):
         """Even on abort, the results dict has the runner-owned envelope
         fields populated (so a future iteration can opt to write partial
         results.json on abort -- not the current behavior, but the
-        envelope shape should be ready for it)."""
+        envelope shape should be ready for it).
+
+        Uses retry_budget_exhausted as the abort trigger because
+        wall_clock-without-retry no longer aborts the eval (it skips
+        the fixture's remaining runs instead). Only retry-budget and
+        wall_clock_in_retry are upstream-poisoned signals that abort."""
         fixtures = [{"q": "a"}]
 
         def fake_runner(fixture, run_idx, fixture_id, transcript_dir,
@@ -547,8 +552,8 @@ class TestRunEvalAbortOnTimeout(unittest.TestCase):
                         skill_path=None, also_install=()):
             return {
                 "fixture_id": fixture_id, "run_idx": run_idx,
-                "elapsed_seconds": 0.5, "total_retries": 0,
-                "timed_out": True, "timeout_reason": "wall_clock",
+                "elapsed_seconds": 0.5, "total_retries": 10,
+                "timed_out": True, "timeout_reason": "retry_budget_exhausted",
                 "transcript_path": None, "pass_": False, "kind_extra": {},
             }
 
@@ -1395,6 +1400,234 @@ class TestRunEvalEnvelope(unittest.TestCase):
             results["harness_version_kind"],
             ("git_sha", "package_version", "unknown"),
         )
+
+
+class TestPerFixtureWallClockSkip(unittest.TestCase):
+    """wall_clock-without-retry on a single fixture skips that fixture's
+    remaining runs but does NOT abort the eval. Other fixtures keep
+    going. Distinguishes "this prompt makes the model think too long"
+    from "the upstream is poisoned" (retry_budget_exhausted)."""
+
+    def test_wall_clock_skips_fixture_continues_eval(self):
+        """3 fixtures x 2 runs = 6 tasks. Fixture beta times out on its
+        first run (wall_clock). beta-2 must be cancelled but alpha and
+        gamma's full sets must still run."""
+        from stream_eval import runner
+
+        fixtures = [
+            {"name": "alpha", "q": "qa"},
+            {"name": "beta", "q": "qb"},
+            {"name": "gamma", "q": "qc"},
+        ]
+        scored_calls = []
+
+        def fake_runner(fixture, run_idx, fixture_id, transcript_dir,
+                        timeout, cwd, get_query, score_run,
+                        skill_path=None, also_install=()):
+            scored_calls.append((fixture_id, run_idx))
+            # beta's first run wall-clocks; everything else returns
+            # cleanly. Crucially, we don't abort.
+            beta_first = (fixture_id == "beta" and run_idx == 1)
+            return {
+                "fixture_id": fixture_id, "run_idx": run_idx,
+                "elapsed_seconds": 0.01, "total_retries": 0,
+                "timed_out": beta_first,
+                "timeout_reason": "wall_clock" if beta_first else None,
+                "transcript_path": None,
+                "pass_": not beta_first, "kind_extra": {},
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch(
+                "stream_eval.runner._run_one_task", side_effect=fake_runner,
+            ):
+                results, exit_code = runner.run_eval(
+                    kind="trigger",
+                    fixtures=fixtures,
+                    get_fixture_id=lambda fx: fx.get("name"),
+                    get_query=lambda fx: fx["q"],
+                    score_run=None,
+                    summarize=lambda fws: [
+                        {"fixture_id": f["fixture_id"]} for f in fws
+                    ],
+                    runs_per_fixture=2, workers=1, timeout=10,
+                    cwd=str(td),
+                    transcript_dir=None,
+                    summary_label="queries",
+                    skill_name="test-skill",
+                    eval_path="evals/test/trigger-eval.json",
+                    executor_class=ThreadPoolExecutor,
+                )
+
+        # Eval should NOT abort.
+        self.assertFalse(
+            results.get("aborted_on_timeout"),
+            "wall_clock on a single fixture must not abort the eval",
+        )
+        self.assertNotEqual(
+            exit_code, 3,
+            "wall_clock-skip path should not return exit code 3",
+        )
+
+        # Scored calls: every fixture's run 1 (round-robin), then
+        # every fixture's run 2 EXCEPT beta-2 (skipped).
+        # Round-robin order is run-major: r1 for all fixtures, then r2.
+        called_pairs = set(scored_calls)
+        self.assertIn(("alpha", 1), called_pairs)
+        self.assertIn(("alpha", 2), called_pairs)
+        self.assertIn(("beta", 1), called_pairs)
+        self.assertNotIn(
+            ("beta", 2), called_pairs,
+            "beta-2 must be skipped after beta-1 wall-clock-timed-out",
+        )
+        self.assertIn(("gamma", 1), called_pairs)
+        self.assertIn(("gamma", 2), called_pairs)
+
+        # Envelope tracks the skip.
+        self.assertEqual(results.get("skipped_runs_for_fixture_timeout"), 1)
+        self.assertEqual(results.get("skipped_fixtures"), ["beta"])
+        # Done count includes the skipped run, so total_runs_planned is
+        # also reached.
+        self.assertEqual(
+            results["completed_runs"], results["total_runs_planned"],
+            "completed_runs should equal planned (skipped runs counted)",
+        )
+
+    def test_wall_clock_in_retry_still_aborts_eval(self):
+        """wall_clock_in_retry is an upstream-poisoned signal (the CLI
+        is wedged inside a retry sleep). That keeps the abort-eval
+        policy -- only plain wall_clock gets the per-fixture skip."""
+        from stream_eval import runner
+
+        fixtures = [{"name": "alpha", "q": "qa"}, {"name": "beta", "q": "qb"}]
+
+        def fake_runner(fixture, run_idx, fixture_id, transcript_dir,
+                        timeout, cwd, get_query, score_run,
+                        skill_path=None, also_install=()):
+            return {
+                "fixture_id": fixture_id, "run_idx": run_idx,
+                "elapsed_seconds": 0.01, "total_retries": 5,
+                "timed_out": True,
+                "timeout_reason": "wall_clock_in_retry",
+                "transcript_path": None,
+                "pass_": False, "kind_extra": {},
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch(
+                "stream_eval.runner._run_one_task", side_effect=fake_runner,
+            ):
+                results, exit_code = runner.run_eval(
+                    kind="trigger",
+                    fixtures=fixtures,
+                    get_fixture_id=lambda fx: fx.get("name"),
+                    get_query=lambda fx: fx["q"],
+                    score_run=None,
+                    summarize=lambda fws: [],
+                    runs_per_fixture=1, workers=1, timeout=10,
+                    cwd=str(td),
+                    transcript_dir=None,
+                    summary_label="queries",
+                    skill_name="test-skill",
+                    eval_path="evals/test/trigger-eval.json",
+                    executor_class=ThreadPoolExecutor,
+                )
+
+        self.assertTrue(
+            results.get("aborted_on_timeout"),
+            "wall_clock_in_retry must still abort the whole eval",
+        )
+        self.assertEqual(exit_code, 3)
+
+
+class TestRunOneTaskTimedOutScoring(unittest.TestCase):
+    """_run_one_task scores even on timed-out runs so kind_extra
+    (first_tool, first_skill, assertion_results) survives partial runs.
+    Without this, callers have to re-read transcripts to recover the
+    trigger signal, defeating the harness's progress line and
+    results.json shape."""
+
+    def _run_with_mocked_spawn(self, *, timed_out, score_fn):
+        """Helper: invoke _run_one_task with _spawn_and_bail mocked to
+        return a synthetic bail dict. score_fn is called by the runner."""
+        import tempfile
+        from unittest import mock
+        from stream_eval import runner
+
+        bail = {
+            "retry_budget_exhausted": False,
+            "wall_timed_out": timed_out,
+            "wall_timed_out_in_retry": False,
+            "total_retries": 0,
+            "latest_attempt": 0,
+            "max_retries_field": 0,
+            "time_in_retries": 0.0,
+            "exit_code": 0 if not timed_out else None,
+            "worktree_contaminated": False,
+            "worktree_changed_paths": [],
+            "worktree_restore_failures": [],
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch(
+                "stream_eval.runner._spawn_and_bail", return_value=bail,
+            ):
+                return runner._run_one_task(
+                    fixture={"name": "fx1", "query": "test"},
+                    run_idx=1,
+                    fixture_id="fx1",
+                    transcript_dir=td,
+                    timeout=10,
+                    cwd=td,
+                    get_query=lambda fx: fx["query"],
+                    score_run=score_fn,
+                )
+
+    def test_timed_out_run_still_calls_score_run(self):
+        """A wall-clock timeout doesn't bypass scoring -- kind_extra
+        must be populated from the partial transcript."""
+        score_calls = []
+
+        def score(fixture, transcript_path, bail):
+            score_calls.append(fixture["name"])
+            return True, {"first_tool": "Skill", "first_skill": "x"}
+
+        result = self._run_with_mocked_spawn(timed_out=True, score_fn=score)
+
+        self.assertEqual(score_calls, ["fx1"], "score_run must be called")
+        self.assertTrue(result["timed_out"])
+        self.assertFalse(
+            result["pass_"], "timed-out run is forced fail regardless of score",
+        )
+        self.assertEqual(
+            result["kind_extra"],
+            {"first_tool": "Skill", "first_skill": "x"},
+            "kind_extra must reflect what score_run returned",
+        )
+
+    def test_clean_run_pass_unchanged_by_timeout_logic(self):
+        """Non-timeout run: score_run's pass verdict flows through."""
+        def score(fixture, transcript_path, bail):
+            return True, {"first_tool": "Skill", "first_skill": "y"}
+
+        result = self._run_with_mocked_spawn(timed_out=False, score_fn=score)
+
+        self.assertFalse(result["timed_out"])
+        self.assertTrue(result["pass_"])
+        self.assertEqual(result["kind_extra"]["first_skill"], "y")
+
+    def test_score_run_raising_does_not_crash_runner(self):
+        """If score_run errors on a partial transcript (e.g. malformed
+        JSONL after truncation), the runner must not propagate -- a
+        broken scorer per-run shouldn't kill the whole eval. pass_ is
+        False, kind_extra is empty."""
+        def score(fixture, transcript_path, bail):
+            raise ValueError("partial transcript")
+
+        result = self._run_with_mocked_spawn(timed_out=True, score_fn=score)
+
+        self.assertFalse(result["pass_"])
+        self.assertEqual(result["kind_extra"], {})
 
 
 if __name__ == "__main__":
