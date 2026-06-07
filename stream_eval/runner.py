@@ -530,6 +530,70 @@ WORKTREE_ROOT = "/tmp/eval-worktrees"
 _WORKTREE_BRANCHES_AT_CREATE = {}
 
 
+def _lock_worktree_readonly(wt_path):
+    """Recursively chmod the worktree to read-only (dirs r-x, files r--).
+
+    Why: the eval-Sonnet sometimes treats a customer-support prompt as
+    a development directive against the harness's own source -- e.g.
+    "Increase SCAPI timeout to 15 seconds" prompted Edit calls on
+    skills/_shared/scrape/fetch-url.js to add an AbortSignal. The
+    operator repo is already untouchable (worktree isolation), but
+    write attempts inside the worktree wasted spawn time and let the
+    model's wrong-headed exploration run further than necessary.
+
+    Locking the worktree forces those attempts to fail fast (EACCES),
+    surfacing the misinterpretation rather than burning wall-clock on
+    a path that can't help. The skill the spawn ACTUALLY runs via the
+    Skill tool comes from the isolated HOME's symlink to the operator's
+    skill_path -- separate from the worktree's copy, so the lock has
+    no functional effect on the eval, only on freelance writes.
+
+    Symlinks inside skills/lib are followed by os.chmod (not lchmod);
+    this is intentional -- the symlink targets are also inside the
+    worktree (skills/_shared/), and locking them once at the target
+    is what we want.
+    """
+    for root, dirs, files in os.walk(wt_path):
+        # Dirs: keep r-x so traversal works; remove w.
+        for d in dirs:
+            p = os.path.join(root, d)
+            try:
+                st = os.stat(p)
+                os.chmod(p, st.st_mode & ~0o222)
+            except OSError:
+                # Symlinks pointing outside the tree, races with git's
+                # cleanup, etc. Best-effort lock.
+                pass
+        for f in files:
+            p = os.path.join(root, f)
+            try:
+                st = os.stat(p)
+                os.chmod(p, st.st_mode & ~0o222)
+            except OSError:
+                pass
+
+
+def _unlock_worktree(wt_path):
+    """Restore write permission on the worktree before teardown so
+    `git worktree remove --force` (and the trash fallback) don't fight
+    read-only files. Best-effort; complement to _lock_worktree_readonly."""
+    for root, dirs, files in os.walk(wt_path):
+        for d in dirs:
+            p = os.path.join(root, d)
+            try:
+                st = os.stat(p)
+                os.chmod(p, st.st_mode | 0o200)
+            except OSError:
+                pass
+        for f in files:
+            p = os.path.join(root, f)
+            try:
+                st = os.stat(p)
+                os.chmod(p, st.st_mode | 0o200)
+            except OSError:
+                pass
+
+
 def _create_worker_worktree(repo_root, spawn_id):
     """Create a per-spawn `git worktree add` checkout under
     /tmp/eval-worktrees/<pid>-<spawn_id>/. Returns the absolute
@@ -596,6 +660,12 @@ def _destroy_worker_worktree(wt_path):
     failures = []
     if not os.path.exists(wt_path):
         return failures
+
+    # Restore write permission first: _lock_worktree_readonly stripped w
+    # before the spawn ran, and `git worktree remove` / shutil cleanup
+    # need it back. Best-effort; if the spawn was never locked (legacy
+    # path), the restore is a no-op for already-writable files.
+    _unlock_worktree(wt_path)
 
     # Snapshot the operator's current branch set before removal.
     # Read-only; safe even if multiple workers run in parallel
@@ -730,6 +800,12 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd,
     # worker recycles between spawns.
     spawn_id = f"{int(time.time() * 1e9)}"
     wt_path = _create_worker_worktree(repo_root, spawn_id)
+    # Lock the worktree read-only before the spawn runs. Stops the
+    # model from doing dev work on the harness's own source when it
+    # misreads a customer prompt as a development task. Contamination
+    # detection still runs after the spawn so any successful writes
+    # (e.g. via Bash chmod-then-write) still surface as flagged paths.
+    _lock_worktree_readonly(wt_path)
     try:
         with home_ctx as (isolated_home, _isolated_name):
             if isolated_home is not None:

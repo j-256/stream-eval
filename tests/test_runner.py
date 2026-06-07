@@ -830,6 +830,7 @@ class TestSpawnAndBailWorktreeProtection(unittest.TestCase):
 
 from stream_eval.runner import (
     _create_worker_worktree, _destroy_worker_worktree,
+    _lock_worktree_readonly, _unlock_worktree,
 )
 
 
@@ -999,6 +1000,65 @@ class TestWorkerWorktreeLifecycle(unittest.TestCase):
         second = _destroy_worker_worktree(wt)
         self.assertEqual(second, [])
 
+    def test_lock_worktree_readonly_blocks_writes(self):
+        """After _lock_worktree_readonly, writes inside the worktree
+        fail with EACCES. This is what stops the model's freelance
+        Edit calls when it misreads a customer prompt as a dev task."""
+        wt = _create_worker_worktree(self.tmpdir, "test-lock-1")
+        self.addCleanup(_destroy_worker_worktree, wt)
+
+        target = Path(wt, "skills", "module.js")
+        self.assertEqual(target.read_text(), "export {};\n")
+
+        _lock_worktree_readonly(wt)
+
+        with self.assertRaises(PermissionError):
+            target.write_text("modified\n")
+        # Read still works.
+        self.assertEqual(target.read_text(), "export {};\n")
+
+    def test_lock_worktree_blocks_new_files_in_existing_dirs(self):
+        """Locked dirs lose write permission, so creating new files
+        inside them fails. The model's `Write` of a fresh file in
+        skills/ is the same shape as Edit on an existing one."""
+        wt = _create_worker_worktree(self.tmpdir, "test-lock-2")
+        self.addCleanup(_destroy_worker_worktree, wt)
+        _lock_worktree_readonly(wt)
+
+        with self.assertRaises(PermissionError):
+            Path(wt, "skills", "new-file.js").write_text("// new\n")
+
+    def test_unlock_worktree_restores_writes(self):
+        """_unlock_worktree must reverse the lock so teardown can
+        delete the directory tree."""
+        wt = _create_worker_worktree(self.tmpdir, "test-lock-3")
+        # Don't auto-cleanup -- this test verifies cleanup works
+        # post-unlock.
+        target = Path(wt, "skills", "module.js")
+        _lock_worktree_readonly(wt)
+        with self.assertRaises(PermissionError):
+            target.write_text("modified\n")
+
+        _unlock_worktree(wt)
+        target.write_text("modified post-unlock\n")
+        self.assertEqual(target.read_text(), "modified post-unlock\n")
+
+        # Destroy still succeeds after lock+unlock+modify cycle.
+        failures = _destroy_worker_worktree(wt)
+        self.assertEqual(failures, [])
+        self.assertFalse(os.path.exists(wt))
+
+    def test_destroy_succeeds_on_locked_worktree(self):
+        """If the lock is in place at teardown time, _destroy_worker_
+        worktree must still succeed (it calls _unlock_worktree first
+        as a defensive measure)."""
+        wt = _create_worker_worktree(self.tmpdir, "test-lock-4")
+        _lock_worktree_readonly(wt)
+        # No explicit unlock -- destroy should handle it.
+        failures = _destroy_worker_worktree(wt)
+        self.assertEqual(failures, [])
+        self.assertFalse(os.path.exists(wt))
+
 
 class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
     """End-to-end coverage of the worktree-based _spawn_and_bail.
@@ -1073,14 +1133,27 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
     def test_spawn_contamination_inside_worktree_does_not_leak(self):
         """The full ugly contamination shape from iteration-baseline
         (branch + clone + tracked-file edit) all happening inside the
-        worktree. Operator repo must end byte-identical to start."""
+        worktree. Operator repo must end byte-identical to start.
+
+        The worktree is now locked read-only before the spawn runs;
+        a determined eval-Sonnet that bypasses the lock (e.g. via
+        `chmod u+w` in Bash, then writes) is the worst case we still
+        have to be safe against. This test simulates exactly that:
+        chmod the targets writable, then write, then verify the
+        operator repo is untouched."""
         from stream_eval.runner import _spawn_and_bail
 
         def fake_spawn(cmd, transcript_path, env, cwd, timeout):
-            # Eval-Sonnet enacts the workflow inside the worktree.
+            # Eval-Sonnet bypasses the lock to enact the contamination
+            # workflow inside the worktree. Real Sonnet could do this
+            # via Bash; the test does it directly for determinism.
+            module_js = Path(cwd, "skills", "module.js")
+            os.chmod(module_js, 0o644)
+            os.chmod(Path(cwd, "skills"), 0o755)
+            os.chmod(cwd, 0o755)
             subprocess.run(["git", "checkout", "-b", "feat/eval-phantom"],
                            cwd=cwd, check=True, capture_output=True)
-            Path(cwd, "skills", "module.js").write_text("CONTAMINATED\n")
+            module_js.write_text("CONTAMINATED\n")
             Path(cwd, "phantom-clone").mkdir()
             Path(cwd, "phantom-clone", "README").write_text("phantom\n")
             Path(transcript_path).write_text(
@@ -1174,11 +1247,17 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
         """Detection still fires: if the spawn leaves the worktree
         dirty (any shape), bail['worktree_contaminated'] is True. The
         ISOLATION property is that the operator repo is unaffected;
-        the DETECTION property is so the eval can mark runs unaudited."""
+        the DETECTION property is so the eval can mark runs unaudited.
+        The lock added in _spawn_and_bail prevents the easy contamination
+        shape; this test simulates a determined bypass to verify
+        detection still works when the lock is circumvented."""
         from stream_eval.runner import _spawn_and_bail
 
         def fake_spawn(cmd, transcript_path, env, cwd, timeout):
-            Path(cwd, "skills", "module.js").write_text("CONTAMINATED\n")
+            module_js = Path(cwd, "skills", "module.js")
+            os.chmod(module_js, 0o644)
+            os.chmod(Path(cwd, "skills"), 0o755)
+            module_js.write_text("CONTAMINATED\n")
             Path(transcript_path).write_text(
                 '{"type":"result","result":"ok"}\n'
             )
@@ -1202,6 +1281,53 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
 
         self.assertTrue(bail["worktree_contaminated"])
         self.assertIn("skills/module.js", bail["worktree_changed_paths"])
+
+    def test_spawn_locks_worktree_before_spawn_runs(self):
+        """End-to-end: _spawn_and_bail wires _lock_worktree_readonly
+        between worktree creation and the spawn. A naive write that
+        doesn't bypass the lock fails with EACCES, the spawn finishes
+        normally, and the operator repo is untouched."""
+        from stream_eval.runner import _spawn_and_bail
+
+        write_attempts = []
+
+        def fake_spawn(cmd, transcript_path, env, cwd, timeout):
+            # Attempt the naive contamination shape (no lock bypass).
+            try:
+                Path(cwd, "skills", "module.js").write_text("naive\n")
+                write_attempts.append("succeeded")
+            except PermissionError:
+                write_attempts.append("blocked")
+            Path(transcript_path).write_text(
+                '{"type":"result","result":"ok"}\n'
+            )
+            return {
+                "retry_budget_exhausted": False,
+                "wall_timed_out": False,
+                "total_retries": 0,
+                "latest_attempt": 0,
+                "max_retries_field": 0,
+                "exit_code": 0,
+            }
+
+        with mock.patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "inherit"}):
+            with mock.patch(
+                "stream_eval.runner.run_with_retry_aware_bail", side_effect=fake_spawn,
+            ):
+                with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
+                    bail = _spawn_and_bail(
+                        "fake query", tf.name, timeout=30, cwd=self.tmpdir,
+                    )
+
+        self.assertEqual(
+            write_attempts, ["blocked"],
+            "naive write into locked worktree must fail with PermissionError",
+        )
+        self.assertFalse(bail["worktree_contaminated"])
+        # Operator file is unchanged.
+        self.assertEqual(
+            self.victim.read_text(), "export {};\n",
+        )
 
     def test_spawn_operator_wip_outside_worktree_is_invisible(self):
         """The `worktree-at-HEAD` property: uncommitted operator edits
