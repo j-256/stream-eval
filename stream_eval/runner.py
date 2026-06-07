@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from stream_eval.pool import Dispatcher
+from stream_eval.pool import Dispatcher, DispatcherState
 
 from stream_eval.env import load_dotenv
 from stream_eval.isolation import prepare_isolated_home
@@ -1204,10 +1204,28 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
     driver = threading.Thread(target=_drive_dispatcher, daemon=True)
     driver.start()
 
+    # Operator-stopped flag: when dispatcher.state goes to STOPPED from
+    # outside (the STOP socket verb -> dispatcher.stop()), the runner
+    # main loop must exit even if `done < total`. Without this, the
+    # loop spins forever waiting on results that will never come (the
+    # dispatcher's pending queue is drained, no more workers spawn,
+    # but the main thread's exit condition only fires when done==total).
+    #
+    # Only flag operator_stopped on the *empty* drain after STOPPED:
+    # the dispatcher transitions to STOPPED both on operator stop AND
+    # on natural completion (last task reaped). We don't want to
+    # confuse natural completion with operator-initiated stop, so we
+    # require an empty drain in the STOPPED state to confirm "the
+    # main loop is genuinely waiting on results that won't arrive."
+    operator_stopped = False
     try:
         while done < total:
             new_records = list(dispatcher.drain_completed())
             if not new_records:
+                if dispatcher.state == DispatcherState.STOPPED \
+                        and not aborted_on_timeout:
+                    operator_stopped = True
+                    break
                 time.sleep(0.05)
                 continue
             for r in new_records:
@@ -1372,6 +1390,7 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
         "total_fixtures": len(fixtures),
         "elapsed_seconds": round(elapsed, 1),
         "aborted_on_timeout": aborted_on_timeout,
+        "operator_stopped": operator_stopped,
         # `completed_runs` counts both genuine completions and per-
         # fixture skips (fixtures whose first run wall-clock-timed-out
         # have their remaining runs cancelled). The `skipped_*` fields
@@ -1388,7 +1407,11 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
     envelope["harness_version"] = harness_version
     envelope["harness_version_kind"] = harness_version_kind
 
-    verdict = "aborted" if aborted_on_timeout else "completed"
+    # An operator-initiated STOP is treated as aborted (matches
+    # bail-on-timeout for envelope/dashboard purposes -- it didn't
+    # complete every task -- without the upstream-poisoned exit code 3
+    # since the API itself wasn't poisoned).
+    verdict = "aborted" if (aborted_on_timeout or operator_stopped) else "completed"
     print(
         format_finish_banner(kind=kind, skill=skill_name, verdict=verdict),
         file=sys.stderr,
@@ -1396,6 +1419,8 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
 
     if aborted_on_timeout:
         return envelope, 3
+    if operator_stopped:
+        return envelope, 1
 
     fixtures_failed = sum(1 for r in summary if not r.get("pass", False))
     closing = (

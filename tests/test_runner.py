@@ -1736,6 +1736,94 @@ class TestPerFixtureWallClockSkip(unittest.TestCase):
         self.assertEqual(exit_code, 3)
 
 
+class TestOperatorStop(unittest.TestCase):
+    """The dashboard's stop button calls dispatcher.stop() externally.
+    The runner's main loop must notice and exit even though
+    `done < total` -- otherwise the run hangs forever waiting on
+    results that will never come (no spawns, queue drained)."""
+
+    def test_external_dispatcher_stop_exits_main_loop(self):
+        """Simulate the operator clicking 'stop' mid-run:
+        target_workers goes to 0 and dispatcher.state goes to STOPPED.
+        The main loop must exit and tag the run aborted."""
+        from stream_eval import runner
+
+        fixtures = [
+            {"name": "alpha", "q": "qa"},
+            {"name": "beta", "q": "qb"},
+            {"name": "gamma", "q": "qc"},
+        ]
+        gate = threading.Event()
+
+        def fake_runner(fixture, run_idx, fixture_id, transcript_dir,
+                        timeout, cwd, get_query, score_run,
+                        skill_path=None, also_install=()):
+            """alpha-1 runs immediately, then signals the test thread
+            to stop the dispatcher. Subsequent calls block on a gate
+            (released at end-of-test) so they're cancellable but don't
+            hang the test if cancellation is broken."""
+            is_first = (fixture_id == "alpha" and run_idx == 1)
+            if not is_first:
+                gate.wait(timeout=2.0)
+            return {
+                "fixture_id": fixture_id, "run_idx": run_idx,
+                "elapsed_seconds": 0.01, "total_retries": 0,
+                "timed_out": False, "timeout_reason": None,
+                "transcript_path": None, "pass_": True, "kind_extra": {},
+            }
+
+        # Stop the dispatcher 0.1s into the run, after alpha-1 has
+        # completed. Use the module-global hook the control surfaces
+        # already use.
+        def stop_after_delay():
+            time.sleep(0.1)
+            d = runner.get_current_dispatcher()
+            if d is not None:
+                d.target_workers = 0
+                d.stop()
+
+        stopper = threading.Thread(target=stop_after_delay, daemon=True)
+        stopper.start()
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                with mock.patch(
+                    "stream_eval.runner._run_one_task",
+                    side_effect=fake_runner,
+                ):
+                    results, exit_code = runner.run_eval(
+                        kind="trigger",
+                        fixtures=fixtures,
+                        get_fixture_id=lambda fx: fx.get("name"),
+                        get_query=lambda fx: fx["q"],
+                        score_run=None,
+                        summarize=lambda fws: [
+                            {"fixture_id": f["fixture_id"]} for f in fws
+                        ],
+                        runs_per_fixture=2, workers=1, timeout=10,
+                        cwd=str(td),
+                        transcript_dir=None,
+                        summary_label="queries",
+                        skill_name="test-skill",
+                        eval_path="evals/test/trigger-eval.json",
+                        executor_class=ThreadPoolExecutor,
+                    )
+        finally:
+            gate.set()
+            stopper.join(timeout=1.0)
+
+        # Operator-stopped run produces an envelope, returns exit 1
+        # (failure-ish but not poisoned), is tagged operator_stopped,
+        # is NOT aborted_on_timeout (separate signal).
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(results.get("operator_stopped"))
+        self.assertFalse(results.get("aborted_on_timeout"))
+        self.assertLess(
+            results["completed_runs"], results["total_runs_planned"],
+            "operator stop should cut the run short",
+        )
+
+
 class TestRunOneTaskTimedOutScoring(unittest.TestCase):
     """_run_one_task scores even on timed-out runs so kind_extra
     (first_tool, first_skill, assertion_results) survives partial runs.
