@@ -153,12 +153,14 @@
       if (!isControlForm && !isDialogForm) return;
       ev.preventDefault();
       inFlightPost = true;
-      // Close the parent dialog (if any) before the post so the user
-      // sees it disappear immediately rather than after the round-trip.
-      const dialog = form.closest("dialog");
-      if (dialog) dialog.close();
+      // Capture form.action before doing anything else: closing a
+      // <dialog> mid-submit invalidates references on some engines
+      // (Edge, Safari WebKit). Don't call dialog.close() here -- the
+      // <main> replacement below removes the whole row including its
+      // dialog, so the modal goes away naturally with the re-render.
+      const action = form.action;
       try {
-        const res = await fetch(form.action, { method: "POST" });
+        const res = await fetch(action, { method: "POST" });
         const html = await res.text();
         document.querySelector("main").innerHTML = html;
         applyPersistedDetails();

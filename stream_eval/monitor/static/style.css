@@ -55,7 +55,8 @@ header { display: flex; align-items: baseline; gap: 1rem;
   margin-top: 0.5rem; display: flex; gap: 0.5rem;
   align-items: center; font-size: 0.9rem;
 }
-.controls button { padding: 0.2rem 0.5rem; cursor: pointer; }
+.controls button,
+.confirm-dialog button { padding: 0.2rem 0.5rem; cursor: pointer; }
 .workers-current { color: #666; }
 .workers-count { font-weight: bold; color: #222; }
 table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
@@ -66,32 +67,33 @@ tr.fail { background: #fff5f5; }
 .query { font-family: ui-monospace, monospace; font-size: 0.85rem;
          color: #444; }
 
+/* Confirmation dialog (stop / trash). <dialog> styling is sparse by
+   default; opt-in to a card look, with a backdrop dim. */
+.confirm-dialog {
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 1rem 1.25rem;
+  max-width: 32rem;
+}
+.confirm-dialog h2 { margin: 0 0 0.5rem; font-size: 1.05rem; }
+.confirm-dialog p { margin: 0 0 0.5rem; }
+.confirm-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-top: 0.75rem;
+}
+.confirm-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
 /* Dark mode: respects the OS / browser preference. Cells keep their
    semantic colors (green/red/gray/yellow outline) but darkened
    slightly; backgrounds and text invert. */
 @media (prefers-color-scheme: dark) {
   body { background: #1a1a1a; color: #e0e0e0; }
   header { border-bottom-color: #333; }
-  /* Confirmation dialog (stop / trash). <dialog> styling is sparse by
-     default; opt-in to a card look, with a backdrop dim. */
-  .confirm-dialog {
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    padding: 1rem 1.25rem;
-    max-width: 32rem;
-  }
-  .confirm-dialog h2 { margin: 0 0 0.5rem; font-size: 1.05rem; }
-  .confirm-dialog p { margin: 0 0 0.5rem; }
-  .confirm-actions {
-    display: flex;
-    gap: 0.5rem;
-    justify-content: flex-end;
-    margin-top: 0.75rem;
-  }
-  .confirm-dialog::backdrop {
-    background: rgba(0, 0, 0, 0.4);
-  }
-
+  .confirm-dialog { border-color: #444; background: #2a2a2a; color: #e0e0e0; }
   .session, .kind, .workers-current, .empty, .query { color: #999; }
   .row { border-color: #333; background: #232323; }
   .row-workers summary, .row-recent summary { color: #aaa; }
