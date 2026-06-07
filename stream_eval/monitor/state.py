@@ -57,6 +57,11 @@ class DashboardRow:
     # Mtime of the source .output file -- used to break ties when more
     # than the per-skill cap of completed rows survives the window.
     mtime: float = 0.0
+    # Ctime of the source .output file. Approximates the harness's
+    # start time -- the runner creates the file immediately after the
+    # tee installs. Used by the stop-confirmation modal to render
+    # "running for X minutes" without parsing the banner timestamp.
+    ctime: float = 0.0
 
 
 @dataclass
@@ -101,9 +106,12 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
         except OSError:
             continue
         try:
-            mtime = Path(path).stat().st_mtime
+            stat = Path(path).stat()
+            mtime = stat.st_mtime
+            ctime = stat.st_ctime
         except OSError:
             mtime = 0.0
+            ctime = 0.0
         current_key = None
         for line in text.splitlines():
             banner = parse_startup_banner(line)
@@ -118,11 +126,16 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
                         runs=banner["runs"],
                         harness_pid=banner["pid"],
                         mtime=mtime,
+                        ctime=ctime,
                     ),
                 )
                 row.total_fixtures = banner["total_fixtures"]
                 row.runs = banner["runs"]
                 row.mtime = max(row.mtime, mtime)
+                # ctime: keep the earliest -- the file's original
+                # creation time, even if multiple banners (rare).
+                if row.ctime == 0.0 or (ctime > 0 and ctime < row.ctime):
+                    row.ctime = ctime
                 current_key = key
                 continue
 
@@ -149,6 +162,7 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
                     total_fixtures=0, runs=0,
                     harness_pid=current_key[2],
                     mtime=mtime,
+                    ctime=ctime,
                 ),
             )
             row.cells.append(DashboardCell(

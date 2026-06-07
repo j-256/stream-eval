@@ -139,6 +139,18 @@ def test_socket_pause_resume(socket_server):
     assert d._paused is False
 
 
+def test_socket_stop(socket_server):
+    """STOP zeros target_workers AND transitions the dispatcher to
+    STOPPED. Matches the runner.py abort path: in-flight workers
+    finish naturally, no new spawns."""
+    sock_path, d = socket_server
+    assert d.target_workers == 4
+    assert d._stopped is False
+    assert _send_socket_command(sock_path, "STOP") == "OK"
+    assert d.target_workers == 0
+    assert d._stopped is True
+
+
 def test_socket_unknown_command(socket_server):
     sock_path, _d = socket_server
     response = _send_socket_command(sock_path, "FROBNICATE")

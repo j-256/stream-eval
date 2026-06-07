@@ -5,6 +5,12 @@ Read-only dashboard renders DashboardState. Worker-control routes
 Unix socket -- per-row routing means a +1 button on the dsc-scrape
 row never affects a concurrently-running dsc-triage eval.
 
+Lifecycle routes:
+- POST /workers/stop/<pid>: send STOP over the socket; in-flight
+  workers finish naturally, no new spawns.
+- POST /prune/<pid>: trash the row's .output file. Refuses if the
+  pid is still alive (use stop first). Path-traversal guarded.
+
 Public surface:
 - create_app(session): Flask application factory; the test client
   uses this.
@@ -14,8 +20,11 @@ Public surface:
   no-arg `eval-monitor.py`).
 """
 import os
+import shutil
+import subprocess
 import time
 import webbrowser
+from pathlib import Path
 
 from flask import (
     Flask, render_template, request,
@@ -53,6 +62,10 @@ def create_app(session=None):
             "session": _resolve_session(),
             "poll_active_ms": _poll_default("STREAM_EVAL_POLL_ACTIVE_MS", 5000),
             "poll_idle_ms": _poll_default("STREAM_EVAL_POLL_IDLE_MS", 30000),
+            # `now` for stop-dialog runtime estimates -- the row carries
+            # ctime, the template subtracts to render "running for Xm"
+            # without needing JS-side clock math.
+            "now": time.time(),
         }
 
     @app.route("/", methods=["GET"])
@@ -98,7 +111,110 @@ def create_app(session=None):
     def workers_resume(pid):
         return _action_response_for_pid(pid, lambda c: c.resume())
 
+    @app.route("/workers/stop/<int:pid>", methods=["POST"],
+               endpoint="workers_stop")
+    def workers_stop(pid):
+        return _action_response_for_pid(pid, lambda c: c.stop())
+
+    @app.route("/prune/<int:pid>", methods=["POST"], endpoint="prune_row")
+    def prune_row(pid):
+        """Trash the .output file for a non-active row.
+
+        Refuses if the pid is still alive: a running harness's tee
+        is still writing to the file, and either the trash would
+        silently re-appear or the tee would break. Use STOP first.
+
+        Macs get `mv ~/.Trash/` (recoverable from Finder); other
+        platforms fall back to os.unlink. Path-traversal guarded:
+        only paths under the canonical .output dir are removable.
+        """
+        log_dir = Path.home() / ".claude" / "projects" / "stream-eval"
+        target = log_dir / f"{pid}.output"
+        # Path-traversal guard: resolve and verify the target stays
+        # inside log_dir. Pid is already constrained by the int route
+        # converter, but the parent dir could theoretically be
+        # symlinked elsewhere -- we want to fail closed.
+        try:
+            resolved = target.resolve(strict=False)
+            log_dir_resolved = log_dir.resolve(strict=False)
+            if log_dir_resolved not in resolved.parents:
+                ctx = _gather_state()
+                return render_template(
+                    "partials/_dashboard_main.html", **ctx,
+                ), 400
+        except (OSError, ValueError):
+            ctx = _gather_state()
+            return render_template(
+                "partials/_dashboard_main.html", **ctx,
+            ), 400
+
+        # Active-pid guard. _is_pid_alive is the same probe state.py
+        # uses to decide row status; consistent here.
+        if _is_pid_alive(pid):
+            ctx = _gather_state()
+            return render_template(
+                "partials/_dashboard_main.html", **ctx,
+            ), 409  # Conflict -- stop the run first.
+
+        if target.exists():
+            _trash_file(target)
+
+        ctx = _gather_state()
+        return render_template("partials/_dashboard_main.html", **ctx)
+
     return app
+
+
+def _is_pid_alive(pid):
+    """Cheap pid-liveness probe. Returns True if the pid is alive,
+    False if it's gone or unreachable."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _trash_file(path):
+    """Move `path` to the recoverable trash on macOS, fall back to
+    unlink elsewhere. Best-effort: failures are silently swallowed
+    because the dashboard's prune route doesn't have a great place to
+    surface 'we couldn't trash this' errors -- the row staying
+    visible after the click is itself the error signal."""
+    if shutil.which("trash"):
+        # macOS `trash` CLI handles name conflicts in ~/.Trash/ via
+        # numeric suffixes, no extra logic needed.
+        try:
+            subprocess.run(
+                ["trash", str(path)],
+                check=False,
+                capture_output=True,
+                timeout=5,
+            )
+            if not path.exists():
+                return
+        except (subprocess.SubprocessError, OSError):
+            pass
+    if os.uname().sysname == "Darwin":
+        # Mac without `trash` CLI: mv to ~/.Trash directly. Adds a
+        # numeric suffix on conflict to match Finder's behavior.
+        trash_dir = Path.home() / ".Trash"
+        if trash_dir.is_dir():
+            target = trash_dir / path.name
+            n = 1
+            while target.exists():
+                target = trash_dir / f"{path.stem} {n}{path.suffix}"
+                n += 1
+            try:
+                shutil.move(str(path), str(target))
+                return
+            except OSError:
+                pass
+    # Last resort: permanent unlink.
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def _row_socket_snapshot(row):

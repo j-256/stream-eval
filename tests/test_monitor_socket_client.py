@@ -35,13 +35,18 @@ class _StubDispatcher:
     def __init__(self):
         self.target_workers = 4
         self._paused = False
+        self._stopped = False
     def pause(self):
         self._paused = True
     def resume(self):
         self._paused = False
+    def stop(self):
+        self._stopped = True
     @property
     def state(self):
         from stream_eval.pool import DispatcherState
+        if self._stopped:
+            return DispatcherState.STOPPED
         return DispatcherState.PAUSED if self._paused else DispatcherState.RUNNING
 
 
@@ -93,6 +98,14 @@ def test_socket_client_pause_resume(harness_socket):
     assert d._paused
     client.resume()
     assert not d._paused
+
+
+def test_socket_client_stop(harness_socket):
+    sock_path, d = harness_socket
+    client = HarnessSocketClient(sock_path)
+    client.stop()
+    assert d._stopped is True
+    assert d.target_workers == 0
 
 
 def test_socket_client_raises_when_socket_missing(tmp_path):

@@ -93,6 +93,14 @@ class HarnessSocketClient:
         if resp != "OK":
             raise SocketClientError(resp)
 
+    def stop(self):
+        """Cancel a running eval cleanly. In-flight workers finish; no
+        new tasks spawn. The runner's main loop terminates when the
+        dispatcher state goes to STOPPED."""
+        resp = self._send("STOP")
+        if resp != "OK":
+            raise SocketClientError(resp)
+
     def get_state(self):
         resp = self._send("GET state")
         if resp.startswith("ERR"):

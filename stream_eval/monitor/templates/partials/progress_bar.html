@@ -56,7 +56,52 @@
       <form method="post" action="{{ url_for('workers_resume', pid=row.harness_pid) }}" style="display:inline">
         <button type="submit"{% if row.dispatcher_state == "running" %} disabled{% endif %}>resume</button>
       </form>
+      {# Stop button opens a confirmation dialog. <dialog> handles
+         Escape-to-close natively; the form's submit button is
+         autofocused so Enter/Space confirms. #}
+      <button type="button" class="open-stop-dialog"
+              data-dialog-target="stop-dialog-{{ row.harness_pid }}">stop</button>
     </div>
+    {% set done = row.cells | length %}
+    {% set total = row.total_fixtures * row.runs %}
+    {% set remaining = total - done %}
+    {% set elapsed_s = (now - row.ctime) if (row.ctime and now) else 0 %}
+    {% set elapsed_m = (elapsed_s // 60) | int %}
+    <dialog id="stop-dialog-{{ row.harness_pid }}" class="confirm-dialog">
+      <form method="post" action="{{ url_for('workers_stop', pid=row.harness_pid) }}">
+        <h2>Stop {{ row.skill }} ({{ row.kind }})?</h2>
+        <p>
+          {{ done }} of {{ total }} runs done
+          {% if elapsed_s > 0 %}
+            &middot; running for {{ elapsed_m }}m
+          {% endif %}
+          {% if remaining > 0 and done > 0 and elapsed_s > 0 %}
+            &middot; ~{{ ((remaining * elapsed_s / done) // 60) | int }}m remaining if left to finish
+          {% endif %}
+        </p>
+        <p>In-flight runs will finish naturally; no new runs will start.</p>
+        <div class="confirm-actions">
+          <button type="button" class="cancel-dialog">Cancel</button>
+          <button type="submit" class="confirm-stop" autofocus>Stop run</button>
+        </div>
+      </form>
+    </dialog>
+  {% endif %}
+  {% if row.status != "active" and row.harness_pid is not none %}
+    <div class="controls">
+      <button type="button" class="open-trash-dialog"
+              data-dialog-target="trash-dialog-{{ row.harness_pid }}">trash</button>
+    </div>
+    <dialog id="trash-dialog-{{ row.harness_pid }}" class="confirm-dialog">
+      <form method="post" action="{{ url_for('prune_row', pid=row.harness_pid) }}">
+        <h2>Remove {{ row.skill }} ({{ row.kind }}) from dashboard?</h2>
+        <p>The .output file will be moved to ~/.Trash and the row will disappear from the dashboard. The structured run data under runs/ is unaffected.</p>
+        <div class="confirm-actions">
+          <button type="button" class="cancel-dialog">Cancel</button>
+          <button type="submit" class="confirm-trash" autofocus>Move to Trash</button>
+        </div>
+      </form>
+    </dialog>
   {% endif %}
   {% set details_key_workers = 'row-workers:' ~ (row.harness_pid or 'legacy') ~ ':' ~ row.skill ~ ':' ~ row.kind %}
   {% set details_key_recent = 'row-recent:' ~ (row.harness_pid or 'legacy') ~ ':' ~ row.skill ~ ':' ~ row.kind %}

@@ -143,12 +143,20 @@
     /* Intercept worker-control form submits. POST to the form's action,
        replace <main> with the response body, and restart the polling
        cycle. As of F.5 every row has its own controls (no global
-       controls block), so the selector is simply .row .controls form. */
+       controls block), so the selector is simply .row .controls form.
+       Stop and trash dialogs ALSO post forms; the .confirm-dialog form
+       selector catches those too. */
     document.addEventListener("submit", async (ev) => {
       const form = ev.target;
-      if (!form.matches(".row .controls form")) return;
+      const isControlForm = form.matches(".row .controls form");
+      const isDialogForm = form.matches(".row .confirm-dialog form");
+      if (!isControlForm && !isDialogForm) return;
       ev.preventDefault();
       inFlightPost = true;
+      // Close the parent dialog (if any) before the post so the user
+      // sees it disappear immediately rather than after the round-trip.
+      const dialog = form.closest("dialog");
+      if (dialog) dialog.close();
       try {
         const res = await fetch(form.action, { method: "POST" });
         const html = await res.text();
@@ -163,6 +171,28 @@
         inFlightPost = false;
         if (timer) clearTimeout(timer);
         timer = setTimeout(refresh, getPollMs("active"));
+      }
+    });
+
+    /* Open the confirmation dialog whose id matches the button's
+       data-dialog-target. <dialog>.showModal() handles the backdrop,
+       focus trap, and Escape-to-close. The autofocus attribute on the
+       confirm button means Enter/Space immediately confirms once the
+       dialog is open. */
+    document.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-dialog-target]");
+      if (btn) {
+        const id = btn.dataset.dialogTarget;
+        const dialog = document.getElementById(id);
+        if (dialog && typeof dialog.showModal === "function") {
+          dialog.showModal();
+        }
+        return;
+      }
+      const cancel = ev.target.closest(".cancel-dialog");
+      if (cancel) {
+        const dialog = cancel.closest("dialog");
+        if (dialog) dialog.close();
       }
     });
 

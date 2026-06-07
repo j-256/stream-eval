@@ -10,8 +10,16 @@ outside the harness. Three control surfaces:
    SET workers <n>      -> "OK\n"
    PAUSE                -> "OK\n"
    RESUME               -> "OK\n"
+   STOP                 -> "OK\n"
    GET state            -> "<state>\n"
    QUIT                 -> closes the connection
+
+   STOP transitions the dispatcher to STOPPED and zeros target_workers,
+   matching the runner's abort path. In-flight workers finish naturally
+   (no mid-task kill); pending tasks never spawn. The runner's
+   `while done < total` loop terminates when the dispatcher state goes
+   to STOPPED, even if not every task ran. Used by the dashboard's
+   stop-button to cancel a long-running eval cleanly.
 
 Public surface:
 - install_signal_handlers(): wire SIGUSR1/SIGUSR2.
@@ -132,5 +140,12 @@ def _handle_line(line):
         return "OK"
     if cmd == "RESUME":
         d.resume()
+        return "OK"
+    if cmd == "STOP":
+        # Match runner.py's abort path: zero target_workers so no new
+        # tasks spawn, then stop() to break the run-until-complete loop
+        # on its next poll cycle. In-flight workers finish naturally.
+        d.target_workers = 0
+        d.stop()
         return "OK"
     return f"ERR unknown command: {cmd!r}"

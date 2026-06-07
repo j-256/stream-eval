@@ -152,3 +152,108 @@ def test_socket_client_failure_does_not_500_the_dashboard(client):
         instance.increment.side_effect = SocketClientError("no socket")
         rv = client.post("/workers/+1/99999")
     assert rv.status_code == 200
+
+
+def test_workers_stop_route_uses_pid(client):
+    """The stop button on a row routes to that row's harness pid socket
+    and calls stop() on the client. In-flight runs finish naturally;
+    no new spawns happen."""
+    with mock.patch(
+        "stream_eval.monitor.app.HarnessSocketClient"
+    ) as mock_cls:
+        instance = mock_cls.return_value
+        rv = client.post("/workers/stop/99999")
+    assert rv.status_code == 200
+    instance.stop.assert_called_once()
+    sock_path = mock_cls.call_args[0][0]
+    assert sock_path == "/tmp/stream-eval-99999.sock"
+
+
+def test_active_row_renders_stop_button(client):
+    """An active row must surface a stop button; trash must NOT appear
+    for active rows (those have to be stopped first)."""
+    rv = client.get("/")
+    body = rv.data.decode("utf-8")
+    assert "open-stop-dialog" in body, "stop button missing on active row"
+    assert "open-trash-dialog" not in body, \
+        "trash button should not appear on active row"
+
+
+def test_completed_row_renders_trash_button(tmp_path):
+    """A completed row (no active pid) must surface a trash button and
+    NOT a stop button. Uses a separate fixture from the module-level
+    `client` because that one always pretends pid 99999 is alive."""
+    output = tmp_path / "session-y.output"
+    output.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=2 workers=2 "
+        "total_fixtures=1 pid=88888 ===\n"
+        "[1/2] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+        "=== eval finished: kind=trigger skill=dsc-scrape pid=88888 "
+        "verdict=completed ===\n"
+    )
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[output]), \
+         mock.patch("stream_eval.monitor.state._default_is_pid_alive",
+                    return_value=False):
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.get("/")
+    body = rv.data.decode("utf-8")
+    assert "open-trash-dialog" in body
+    assert "open-stop-dialog" not in body
+
+
+def test_prune_refuses_when_pid_is_alive(client):
+    """The prune route must refuse if the pid is still alive (a running
+    harness's tee is still writing to the file). Status 409 with no
+    file removed."""
+    with mock.patch(
+        "stream_eval.monitor.app._is_pid_alive", return_value=True,
+    ):
+        rv = client.post("/prune/99999")
+    assert rv.status_code == 409
+
+
+def test_prune_removes_dead_pid_output_file(tmp_path, monkeypatch):
+    """When the pid is dead, the .output file is moved to trash (or
+    unlinked as last resort) and the route returns 200."""
+    log_dir = tmp_path / ".claude" / "projects" / "stream-eval"
+    log_dir.mkdir(parents=True)
+    target = log_dir / "77777.output"
+    target.write_text("=== eval starting: ... ===\n")
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[]), \
+         mock.patch("stream_eval.monitor.app._is_pid_alive",
+                    return_value=False), \
+         mock.patch("stream_eval.monitor.app._trash_file") as mock_trash:
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.post("/prune/77777")
+    assert rv.status_code == 200
+    mock_trash.assert_called_once()
+    called_path = mock_trash.call_args[0][0]
+    assert called_path.name == "77777.output"
+
+
+def test_prune_idempotent_on_already_missing_file(tmp_path, monkeypatch):
+    """If the file's already gone, prune still returns 200 (idempotent).
+    No trash call -- nothing to trash."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[]), \
+         mock.patch("stream_eval.monitor.app._is_pid_alive",
+                    return_value=False), \
+         mock.patch("stream_eval.monitor.app._trash_file") as mock_trash:
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.post("/prune/55555")
+    assert rv.status_code == 200
+    mock_trash.assert_not_called()
