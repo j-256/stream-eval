@@ -122,11 +122,14 @@ def score_trigger_run(fixture, transcript_path, bail, *, target_skill):
     first_tool / first_skill in kind_extra so partial-run transcripts
     don't lose their trigger signal.
 
-    Returns (pass: bool, kind_extra: dict). pass=True iff the first
-    tool_use in the transcript is the Skill tool with input matching
-    target_skill. If the transcript has no tool_use yet (e.g. timed out
-    before any tool fired), first_tool/first_skill are None and pass is
-    False.
+    Returns (pass: bool, kind_extra: dict). pass=True iff the run's
+    trigger outcome MATCHES the fixture's should_trigger expectation:
+    a should_trigger=true fixture passes when the skill fired, and a
+    should_trigger=false fixture passes when it didn't. Earlier
+    versions returned `pass = triggered`, which made correct declines
+    render as red on the dashboard's per-run cells. kind_extra always
+    carries the raw `triggered` boolean so callers that need the
+    underlying signal can read it directly.
     """
     first_tool = None
     first_skill = None
@@ -151,7 +154,8 @@ def score_trigger_run(fixture, transcript_path, bail, *, target_skill):
                 break
 
     triggered = (first_tool == "Skill" and first_skill == target_skill)
-    return triggered, {
+    matched_expected = (triggered == fixture.get("should_trigger", True))
+    return matched_expected, {
         "triggered": triggered,
         "first_tool": first_tool,
         "first_skill": first_skill,
@@ -250,10 +254,15 @@ def main(argv=None):
             for entry in fixtures_with_runs:
                 fx = entry["fixture"]
                 runs = entry["runs"]
-                # score_trigger_run sets pass_ = triggered, so the runner's
-                # canonical pass_ field is the per-run trigger result. Use
-                # it directly rather than re-reading kind_extra.triggered.
-                triggers = sum(1 for r in runs if r["pass_"])
+                # Read `triggered` from kind_extra, NOT pass_. As of the
+                # green-means-correct fix, pass_ is "matched expected"
+                # (correct decline => True), so summing pass_ would
+                # conflate fires with correct declines. The trigger
+                # rate is specifically about whether the skill fired.
+                triggers = sum(
+                    1 for r in runs
+                    if (r.get("kind_extra") or {}).get("triggered")
+                )
                 rate = triggers / len(runs) if runs else 0
                 did_pass = (
                     (rate >= 0.5) if fx["should_trigger"]

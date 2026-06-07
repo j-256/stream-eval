@@ -91,12 +91,12 @@ class TestScoreTriggerRun(unittest.TestCase):
             self.assertEqual(extra["first_tool"], "Bash")
 
     def test_pass_when_no_tool_used_and_should_not_trigger(self):
-        """The harness's pass criterion is per-query rate-based, but
-        the per-run callback returns (triggered, ...). The rate-based
-        decision happens in summarize(), not here. So a single run that
-        correctly didn't trigger reports pass_=False (didn't trigger),
-        and the summarize step decides whether the rate matches
-        should_trigger=False at the fixture level."""
+        """A single run that correctly didn't trigger reports pass_=True
+        because the per-run pass means 'matched expected.' On a fixture
+        with should_trigger=False, not-firing IS the correct outcome --
+        so the per-run cell renders green on the dashboard. kind_extra
+        carries triggered=False (the underlying signal) for downstream
+        consumers like summarize() that compute the trigger rate."""
         with tempfile.TemporaryDirectory() as td:
             transcript = self._write_transcript(td, [
                 {"type": "result", "result": "text-only answer"},
@@ -107,10 +107,30 @@ class TestScoreTriggerRun(unittest.TestCase):
                 fixture, str(transcript), bail,
                 target_skill="dsc-triage",
             )
-            # pass_ here means "this individual run triggered the skill".
-            # It correctly didn't, so triggered=False -> pass_=False.
+            self.assertTrue(pass_, "correct decline should pass")
             self.assertFalse(extra["triggered"])
             self.assertIsNone(extra["first_tool"])
+
+    def test_fail_when_should_not_trigger_but_did(self):
+        """Inverse of test_pass_when_no_tool_used_and_should_not_trigger:
+        if a fixture is should_trigger=False but the skill DID fire,
+        the run is incorrect -- pass_=False, triggered=True."""
+        with tempfile.TemporaryDirectory() as td:
+            transcript = self._write_transcript(td, [{
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "name": "Skill",
+                     "input": {"skill": "dsc-triage"}},
+                ]},
+            }])
+            fixture = {"query": "q", "should_trigger": False}
+            bail = {"retry_budget_exhausted": False, "wall_timed_out": False}
+            pass_, extra = score_trigger_run(
+                fixture, str(transcript), bail,
+                target_skill="dsc-triage",
+            )
+            self.assertFalse(pass_, "over-fire on a decline fixture should fail")
+            self.assertTrue(extra["triggered"])
 
 
 class TestPreflightGuards(unittest.TestCase):
