@@ -43,6 +43,8 @@ from stream_eval.monitor.state import build_state
 
 def create_app(session=None):
     app = Flask(__name__)
+    app.jinja_env.filters["strftime"] = _strftime_local
+    app.jinja_env.filters["start_label"] = _format_start_label
 
     def _resolve_session():
         return session or detect_session()
@@ -306,6 +308,44 @@ def _humanize(seconds):
     if seconds < 3600:
         return f"{int(seconds / 60)}m ago"
     return f"{int(seconds / 3600)}h ago"
+
+
+def _strftime_local(epoch_seconds, fmt="%H:%M"):
+    """Format a unix timestamp in the dashboard's local timezone. Used
+    by the row header's tooltip to render the full started_at date/time.
+    Returns an empty string for None so the template can `{% if %}`
+    cleanly."""
+    if epoch_seconds is None:
+        return ""
+    return time.strftime(fmt, time.localtime(epoch_seconds))
+
+
+def _format_start_label(epoch_seconds, now=None):
+    """Format started_at for the row header's inline label.
+
+    A bare HH:MM repeats every 24h, so a dashboard listing several days
+    of evals can't disambiguate "started 09:14 today" from "09:14 three
+    days ago" -- and relying on the hover tooltip for the date is poor
+    UX (browsers delay it ~1s). So we put the date inline whenever the
+    run did NOT start today: "Jun 08 09:14". Same-day runs (the common
+    case) stay compact at "09:14".
+
+    `now` defaults to time.time(); injectable for deterministic tests.
+    Returns "" for None.
+    """
+    if epoch_seconds is None:
+        return ""
+    if now is None:
+        now = time.time()
+    start_lt = time.localtime(epoch_seconds)
+    now_lt = time.localtime(now)
+    same_day = (
+        (start_lt.tm_year, start_lt.tm_yday)
+        == (now_lt.tm_year, now_lt.tm_yday)
+    )
+    if same_day:
+        return time.strftime("%H:%M", start_lt)
+    return time.strftime("%b %d %H:%M", start_lt)
 
 
 def run_app(*, host, port, session, auto_open):

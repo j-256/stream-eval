@@ -26,7 +26,7 @@ header { display: flex; align-items: baseline; gap: 1rem;
 .status-aborted { background: #e53935; color: #fff; }
 .status-unknown { background: #888; color: #fff; }
 .qpass { margin-left: auto; }
-.runtime { color: #888; font-size: 0.85rem;
+.started, .runtime { color: #888; font-size: 0.85rem;
            font-family: ui-monospace, monospace; }
 .row-workers, .row-recent { margin-top: 0.4rem; font-size: 0.85rem; }
 .row-workers summary, .row-recent summary { cursor: pointer; color: #555; }

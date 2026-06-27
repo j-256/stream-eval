@@ -20,21 +20,26 @@
     {% set total = row.total_fixtures * row.runs %}
     {% set passed = row.cells | selectattr('pass_', 'equalto', true) | list | length %}
     <span class="qpass">{{ passed }}/{{ total }} pass</span>
-    {# Runtime indicator. Active rows show "running Xm" relative to now;
-       completed/aborted rows show "ran Xm" relative to when the finish
-       banner stamped finished_at. Hidden when started_at is unknown
-       (legacy .output files). #}
+    {# Start time + runtime indicator. The clock time of started_at is
+       useful for "when did this kick off?" at-a-glance; runtime is
+       useful for "how long has it been going?". Active rows show
+       "running Xm" relative to now; completed/aborted rows show "ran Xm"
+       relative to when the finish banner stamped finished_at. All
+       hidden when started_at is unknown (legacy .output files). #}
     {% if row.started_at %}
+      <span class="started"
+            title="started {{ row.started_at | strftime('%Y-%m-%d %H:%M:%S') }}">
+        started {{ row.started_at | start_label(now) }}
+      </span>
       {% if row.status == "active" and now %}
         {% set _runtime_s = now - row.started_at %}
-        <span class="runtime"
-              title="started {{ row.started_at | int }}">
+        <span class="runtime">
           running {{ (_runtime_s // 60) | int }}m
         </span>
       {% elif row.finished_at %}
         {% set _runtime_s = row.finished_at - row.started_at %}
         <span class="runtime"
-              title="started {{ row.started_at | int }}, finished {{ row.finished_at | int }}">
+              title="finished {{ row.finished_at | strftime('%Y-%m-%d %H:%M:%S') }}">
           ran {{ (_runtime_s // 60) | int }}m
         </span>
       {% endif %}

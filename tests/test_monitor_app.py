@@ -259,6 +259,137 @@ def test_prune_idempotent_on_already_missing_file(tmp_path, monkeypatch):
     mock_trash.assert_not_called()
 
 
+def test_active_row_renders_start_time_with_date_for_old_run(tmp_path):
+    """An active row whose banner stamped started_at must surface that
+    timestamp as an inline 'started ...' label, plus a tooltip with the
+    full date/time. For a run that did NOT start today, the date is
+    inline (HH:MM alone is ambiguous across a multi-day dashboard).
+    1780000000.0 is 2026-06-08, well in the past, so the label carries
+    the 'Mon DD' date prefix."""
+    import time as _time
+    output = tmp_path / "session-start.output"
+    started_at = 1780000000.0
+    output.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=2 workers=2 "
+        f"total_fixtures=1 pid=33333 started_at={started_at} ===\n"
+        "[1/2] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+    )
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[output]), \
+         mock.patch("stream_eval.monitor.state._default_is_pid_alive",
+                    side_effect=lambda pid: pid == 33333):
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.get("/")
+    body = rv.data.decode("utf-8")
+    # Old run -> date-prefixed inline label, e.g. "started Jun 08 00:04".
+    expected = _time.strftime("%b %d %H:%M", _time.localtime(started_at))
+    assert f"started {expected}" in body, (
+        f"expected 'started {expected}' in dashboard body"
+    )
+    # The full timestamp is still in the tooltip for second-precision.
+    full = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(started_at))
+    assert full in body
+
+
+def test_active_row_renders_inline_start_label_end_to_end(tmp_path):
+    """End-to-end wiring check: the start_label filter is registered and
+    the request's `now` reaches it, so the rendered inline label matches
+    _format_start_label for a recent (same-day) timestamp. The compact-
+    vs-date branching itself is unit-tested deterministically below; this
+    just proves the filter is plumbed through the template with `now`."""
+    import time as _time
+    from stream_eval.monitor.app import _format_start_label
+    now = _time.time()
+    started_at = now - 600  # 10 min ago
+    output = tmp_path / "session-today.output"
+    output.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=2 workers=2 "
+        f"total_fixtures=1 pid=33334 started_at={started_at} ===\n"
+        "[1/2] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+    )
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[output]), \
+         mock.patch("stream_eval.monitor.state._default_is_pid_alive",
+                    side_effect=lambda pid: pid == 33334):
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.get("/")
+    body = rv.data.decode("utf-8")
+    # `now` in the request is captured within milliseconds of our `now`,
+    # so the same-day determination is identical.
+    expected = _format_start_label(started_at, now=now)
+    assert f"started {expected}" in body
+
+
+def test_completed_row_renders_start_time(tmp_path):
+    """Completed rows must also surface started_at so a finished eval's
+    'when did this run?' is answerable at a glance, not just 'how
+    long did it take?'."""
+    import time as _time
+    output = tmp_path / "session-start-done.output"
+    started_at = 1780000000.0
+    finished_at = 1780000600.0
+    output.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=1 workers=2 "
+        f"total_fixtures=1 pid=22222 started_at={started_at} ===\n"
+        "[1/1] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+        "=== eval finished: kind=trigger skill=dsc-scrape pid=22222 "
+        f"verdict=completed finished_at={finished_at} ===\n"
+    )
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[output]), \
+         mock.patch("stream_eval.monitor.state._default_is_pid_alive",
+                    return_value=False):
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.get("/")
+    body = rv.data.decode("utf-8")
+    expected = _time.strftime("%b %d %H:%M", _time.localtime(started_at))
+    assert f"started {expected}" in body
+
+
+def test_legacy_row_without_started_at_omits_start_label(tmp_path):
+    """Legacy .output files (no started_at in banner) must not render
+    a 'started ' label -- there's nothing to render. The runtime
+    indicator is also hidden in this case (existing behavior)."""
+    output = tmp_path / "session-legacy.output"
+    output.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=1 workers=2 "
+        "total_fixtures=1 pid=11111 ===\n"
+        "[1/1] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+    )
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[output]), \
+         mock.patch("stream_eval.monitor.state._default_is_pid_alive",
+                    side_effect=lambda pid: pid == 11111):
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.get("/")
+    body = rv.data.decode("utf-8")
+    assert "started " not in body
+
+
 def test_active_row_retries_persist_from_completed_runs(tmp_path):
     """Retries from finished runs must keep contributing to the row's
     retry count after the worker that did them exits. The live-worker
@@ -363,6 +494,36 @@ def test_zero_retry_active_row_omits_retry_count(tmp_path):
     assert stat, "in-flight-stat span not rendered for active row"
     assert "in flight" in stat.group(0)
     assert "retries" not in stat.group(0)
+
+
+def test_format_start_label_same_day_is_compact():
+    """_format_start_label returns bare HH:MM when start and now fall on
+    the same local calendar day."""
+    import time as _time
+    from stream_eval.monitor.app import _format_start_label
+    start = 1780000000.0
+    # `now` two hours after start, same day.
+    now = start + 2 * 3600
+    label = _format_start_label(start, now=now)
+    assert label == _time.strftime("%H:%M", _time.localtime(start))
+
+
+def test_format_start_label_different_day_includes_date():
+    """_format_start_label prefixes the month/day when the run started
+    on a different calendar day than now -- disambiguating a multi-day
+    dashboard without relying on the hover tooltip."""
+    import time as _time
+    from stream_eval.monitor.app import _format_start_label
+    start = 1780000000.0
+    # `now` three days later.
+    now = start + 3 * 86400
+    label = _format_start_label(start, now=now)
+    assert label == _time.strftime("%b %d %H:%M", _time.localtime(start))
+
+
+def test_format_start_label_none_is_empty():
+    from stream_eval.monitor.app import _format_start_label
+    assert _format_start_label(None) == ""
 
 
 def test_recent_table_shows_per_run_retries(tmp_path):
