@@ -257,3 +257,151 @@ def test_prune_idempotent_on_already_missing_file(tmp_path, monkeypatch):
             rv = c.post("/prune/55555")
     assert rv.status_code == 200
     mock_trash.assert_not_called()
+
+
+def test_active_row_retries_persist_from_completed_runs(tmp_path):
+    """Retries from finished runs must keep contributing to the row's
+    retry count after the worker that did them exits. The live-worker
+    tally drops to 0 the instant a retrying worker finishes (and is
+    always 0 for trigger evals, whose tempfile transcripts can't be
+    read), so the header must sum the per-cell retries carried on each
+    progress line. Two completed runs with retries=2 and retries=1
+    here, no live workers -> the header shows '3 retries'."""
+    output = tmp_path / "session-retries.output"
+    output.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=3 workers=2 "
+        "total_fixtures=1 pid=44440 started_at=1780000000.0 ===\n"
+        "[1/3] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=2 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+        "[2/3] kind=trigger pass=True fixture_id=q0 run=2 elapsed=5s "
+        "retries=1 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+    )
+    # No live workers (find_claude_workers_for returns nothing), pid
+    # alive so the row is active.
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[output]), \
+         mock.patch("stream_eval.monitor.app.find_claude_workers_for",
+                    return_value=[]), \
+         mock.patch("stream_eval.monitor.state._default_is_pid_alive",
+                    side_effect=lambda pid: pid == 44440):
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.get("/")
+    body = rv.data.decode("utf-8")
+    assert "3 retries" in body, "cumulative retries from cells not shown"
+
+
+def test_completed_row_surfaces_cumulative_retries(tmp_path):
+    """A finished run that fought throttling keeps its retry count
+    visible after completion -- the operator can see at a glance which
+    historical runs were retry-heavy."""
+    output = tmp_path / "session-done-retries.output"
+    output.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=2 workers=2 "
+        "total_fixtures=1 pid=44441 started_at=1780000000.0 ===\n"
+        "[1/2] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=4 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+        "[2/2] kind=trigger pass=True fixture_id=q0 run=2 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+        "=== eval finished: kind=trigger skill=dsc-scrape pid=44441 "
+        "verdict=completed finished_at=1780000600.0 ===\n"
+    )
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[output]), \
+         mock.patch("stream_eval.monitor.state._default_is_pid_alive",
+                    return_value=False):
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.get("/")
+    body = rv.data.decode("utf-8")
+    assert "4 retries" in body
+
+
+def test_zero_retry_active_row_omits_retry_count(tmp_path):
+    """A clean run (no retries anywhere) shows just 'N in flight' with
+    no ', 0 retries' tail -- the count only appears when it's nonzero,
+    to keep the header uncluttered in the common case.
+
+    Scoped to the header's in-flight-stat span: the recent-completions
+    table legitimately carries a 'retries' column header, so a
+    body-wide substring check would false-positive on it."""
+    import re
+    output = tmp_path / "session-clean.output"
+    output.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=2 workers=2 "
+        "total_fixtures=1 pid=44442 started_at=1780000000.0 ===\n"
+        "[1/2] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+    )
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[output]), \
+         mock.patch("stream_eval.monitor.app.find_claude_workers_for",
+                    return_value=[]), \
+         mock.patch("stream_eval.monitor.state._default_is_pid_alive",
+                    side_effect=lambda pid: pid == 44442):
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.get("/")
+    body = rv.data.decode("utf-8")
+    stat = re.search(r'<span class="in-flight-stat".*?</span>', body, re.S)
+    assert stat, "in-flight-stat span not rendered for active row"
+    assert "in flight" in stat.group(0)
+    assert "retries" not in stat.group(0)
+
+
+def test_recent_table_shows_per_run_retries(tmp_path):
+    """The Recent completions table carries a retries column so the
+    operator can see which specific runs fought throttling, not just
+    the row-level cumulative total. A retry-heavy run shows its count;
+    a clean run shows '-'."""
+    import re
+    output = tmp_path / "session-recent-retries.output"
+    output.write_text(
+        "=== eval starting: kind=trigger skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=2 workers=2 "
+        "total_fixtures=1 pid=66660 started_at=1780000000.0 ===\n"
+        "[1/2] kind=trigger pass=True fixture_id=q0 run=1 elapsed=5s "
+        "retries=4 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+        "[2/2] kind=trigger pass=False fixture_id=q0 run=2 elapsed=5s "
+        "retries=0 timeout_reason=none first_tool=Skill "
+        "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
+        ": q\n"
+        "=== eval finished: kind=trigger skill=dsc-scrape pid=66660 "
+        "verdict=completed finished_at=1780000600.0 ===\n"
+    )
+    with mock.patch("stream_eval.monitor.app.find_output_files",
+                    return_value=[output]), \
+         mock.patch("stream_eval.monitor.state._default_is_pid_alive",
+                    return_value=False):
+        app = create_app(session=None)
+        app.testing = True
+        with app.test_client() as c:
+            rv = c.get("/")
+    body = rv.data.decode("utf-8")
+    recent = re.search(
+        r'<details class="row-recent".*?</details>', body, re.S,
+    )
+    assert recent, "recent-completions table not rendered"
+    section = recent.group(0)
+    assert "<th>retries</th>" in section
+    # The retry-heavy run's count appears; the clean run shows a dash.
+    assert "<td>4</td>" in section
+    assert "<td>-</td>" in section

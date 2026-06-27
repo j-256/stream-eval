@@ -57,6 +57,17 @@ def create_app(session=None):
             row.in_flight_retries = sum(
                 w.get("retries", 0) for w in row.workers_for_row
             )
+            # Cumulative retries across the whole run: completed runs'
+            # retries (persisted on each cell from the progress line)
+            # plus the live workers' in-progress retries. The live tally
+            # alone drops back to 0 the instant a retrying worker exits
+            # -- and is always 0 for trigger evals, whose transcripts are
+            # unlinked tempfiles the worker-scanner can't read. Summing
+            # the cells makes the number monotonic and meaningful: a run
+            # that hit 3 retries keeps contributing 3 after it finishes.
+            row.total_retries = (
+                sum(c.retries for c in row.cells) + row.in_flight_retries
+            )
         return {
             "state": state,
             "session": _resolve_session(),
@@ -258,12 +269,12 @@ def _claude_workers_for_row(row):
 def _recent_for_row(row):
     """Last 5 cells for this row, rendered as recent-completion records.
 
-    DashboardCell only carries (fixture_id, run, pass_, contaminated)
-    today. The runner's progress line carries more
-    (elapsed/retries/first_tool/first_skill/asserts/query) but state.py
-    discards them after computing pass/fail. A follow-up could plumb
-    them through DashboardCell so the recent-completions table can
-    show the same depth as the original eval-monitor."""
+    DashboardCell carries (fixture_id, run, pass_, contaminated,
+    retries). The runner's progress line carries still more
+    (elapsed/first_tool/first_skill/asserts/query) that state.py
+    discards after computing pass/fail; plumbing those through
+    DashboardCell would let this table reach the original
+    eval-monitor's depth."""
     out = []
     for cell in reversed(row.cells[-5:]):
         out.append({
@@ -271,6 +282,7 @@ def _recent_for_row(row):
             "run": cell.run,
             "pass_": cell.pass_ if cell.pass_ is not None else False,
             "contaminated": cell.contaminated,
+            "retries": cell.retries,
         })
     return out
 

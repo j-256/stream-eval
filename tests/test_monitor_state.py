@@ -43,6 +43,17 @@ def test_build_state_from_one_output_file(sample_output_file):
     assert fail_count == 1
 
 
+def test_build_state_cells_carry_retries(sample_output_file):
+    """Each cell must preserve the progress line's retries=N field so
+    the dashboard can compute a cumulative, persistent retry total
+    instead of relying on the transient live-worker tally."""
+    state = build_state([sample_output_file])
+    cells = state.rows[0].cells
+    by_fixture = {c.fixture_id: c for c in cells}
+    assert by_fixture["q0"].retries == 0
+    assert by_fixture["q1"].retries == 2
+
+
 def test_build_state_separates_concurrent_evals_of_same_skill_kind(tmp_path):
     """Two evals of the same (skill, kind) running concurrently must
     produce two distinct rows -- otherwise their cells interleave and

@@ -1,7 +1,7 @@
 {% if recent %}
   <table>
     <thead><tr>
-      <th>fixture</th><th>run</th><th>verdict</th>
+      <th>fixture</th><th>run</th><th>verdict</th><th>retries</th>
     </tr></thead>
     <tbody>
       {% for r in recent %}
@@ -9,6 +9,7 @@
         <td>{{ r.fixture_id }}</td>
         <td>{{ r.run }}</td>
         <td>{{ 'pass' if r.pass_ else 'fail' }}{% if r.contaminated %} (contaminated){% endif %}</td>
+        <td>{{ r.retries if r.retries else '-' }}</td>
       </tr>
       {% endfor %}
     </tbody>

@@ -29,6 +29,12 @@ class DashboardCell:
     run: int
     pass_: Optional[bool]  # None = pending
     contaminated: bool = False
+    # Retry count for this run, from the progress line's retries=N field.
+    # Persisted per-cell so the dashboard can show a row-level cumulative
+    # retry total that survives a worker finishing -- the live-worker
+    # retry tally drops to 0 the instant a retrying worker exits, which
+    # made the header's retry count flicker back to 0 mid-run.
+    retries: int = 0
 
 
 @dataclass
@@ -178,6 +184,7 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
                 run=prog["run"],
                 pass_=prog["pass_"],
                 contaminated=prog["contaminated"],
+                retries=prog["retries"],
             ))
 
     for key, row in rows_by_key.items():
