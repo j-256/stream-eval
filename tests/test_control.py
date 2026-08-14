@@ -101,7 +101,9 @@ def socket_server():
     # pytest's tmp_path lives under /private/var/folders/... which exceeds
     # the AF_UNIX path limit, so we use /tmp directly with a unique name.
     import tempfile
-    sock_path = tempfile.mktemp(prefix="se_test_", suffix=".sock", dir="/tmp")
+    fd, sock_path = tempfile.mkstemp(prefix="se_test_", suffix=".sock", dir="/tmp")
+    os.close(fd)
+    os.unlink(sock_path)
     d = _StubDispatcher()
 
     with mock.patch("stream_eval.control.get_current_dispatcher", return_value=d):

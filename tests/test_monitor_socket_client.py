@@ -53,9 +53,11 @@ class _StubDispatcher:
 @pytest.fixture
 def harness_socket():
     """Spawn a real serve_socket in a daemon thread and yield the path.
-    Uses tempfile.mktemp under /tmp so the AF_UNIX path stays under
+    Uses a reserved path under /tmp so the AF_UNIX path stays under
     macOS's 104-byte limit."""
-    sock_path = tempfile.mktemp(prefix="se_test_", suffix=".sock", dir="/tmp")
+    fd, sock_path = tempfile.mkstemp(prefix="se_test_", suffix=".sock", dir="/tmp")
+    os.close(fd)
+    os.unlink(sock_path)
     d = _StubDispatcher()
     with mock.patch("stream_eval.control.get_current_dispatcher",
                     return_value=d):
