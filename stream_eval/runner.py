@@ -31,6 +31,11 @@ from stream_eval.subprocess import run_with_retry_aware_bail
 
 load_dotenv()
 EVAL_MODEL = os.environ.get("STREAM_EVAL_MODEL", "sonnet")
+# Optional reasoning-effort level (low|medium|high|xhigh|max) forwarded to
+# `claude -p --effort`. Unset -> the flag is omitted and the CLI uses the model's
+# default effort (e.g. Sonnet 5 defaults to high), preserving prior behavior.
+# Mirrors STREAM_EVAL_MODEL: read from the environment or a gap-filled .env.
+EVAL_EFFORT = os.environ.get("STREAM_EVAL_EFFORT")
 
 # Set during run_eval; signal handlers and socket listeners use this
 # to adjust the running dispatcher's target_workers / state. None when
@@ -810,6 +815,9 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd,
         "--verbose",
         "--include-partial-messages",
         "--model", EVAL_MODEL,
+        # Optional reasoning-effort; omitted when STREAM_EVAL_EFFORT is unset so the
+        # model's own default effort applies (keeps existing runs byte-for-byte).
+        *(["--effort", EVAL_EFFORT] if EVAL_EFFORT else []),
         # bypassPermissions: without this, Skill invocations under `claude -p`
         # return is_error: true content="Execute skill: <name>" (the
         # permission-prompt body, fired in non-interactive mode). The model
