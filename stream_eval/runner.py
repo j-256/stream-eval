@@ -26,7 +26,7 @@ from pathlib import Path
 from stream_eval.pool import Dispatcher, DispatcherState
 
 from stream_eval.env import load_dotenv
-from stream_eval.isolation import prepare_isolated_home
+from stream_eval.isolation import prepare_isolated_home, ISOLATED_CACHE_DIR
 from stream_eval.subprocess import run_with_retry_aware_bail
 
 load_dotenv()
@@ -1043,6 +1043,66 @@ class _SubprocessWorker:
             self._thread.join(timeout=timeout)
 
 
+# DSC reference URLs embedded in fixture queries. Trigger fixtures carry them
+# explicitly; prose-only synthesis fixtures won't match and fall back to the
+# shared-cache warming that compounds across runs
+_DSC_REF_URL_RE = re.compile(
+    r"https?://developer\.salesforce\.com/docs/\S+?/references/[A-Za-z0-9._-]+"
+)
+
+
+def _prewarm_dsc_cache(fixtures, get_query, skill_path):
+    """Serially warm the shared DSC scrape cache for reference URLs named in the
+    fixtures, before the parallel fan-out, so workers hit a warm cache instead of
+    all cold-scraping developer.salesforce.com at once.
+
+    No-op unless the skill ships the shared scrape lib (lib/scrape/scrape.js) and
+    the fixtures name DSC reference URLs. Best-effort: a failed warm is skipped,
+    never fatal -- the run proceeds and scrapes on demand as before.
+    """
+    if not skill_path:
+        return
+    scrape_js = os.path.join(skill_path, "lib", "scrape", "scrape.js")
+    if not os.path.exists(scrape_js):
+        return
+    urls = []
+    seen = set()
+    for fx in fixtures:
+        try:
+            query = get_query(fx) or ""
+        except Exception:
+            continue
+        for hit in _DSC_REF_URL_RE.findall(query):
+            root = hit.split("?", 1)[0].rstrip("/.,)")
+            if root not in seen:
+                seen.add(root)
+                urls.append(root)
+    if not urls:
+        return
+    profile = os.environ.get("STREAM_EVAL_PROFILE", "isolated")
+    cache_root = ISOLATED_CACHE_DIR if profile == "isolated" else os.path.join(
+        os.path.expanduser("~"), ".cache", "dsc-scrape"
+    )
+    os.makedirs(cache_root, exist_ok=True)
+    print(
+        f"pre-warm: {len(urls)} DSC reference(s) -> {cache_root} "
+        f"(serial, before fan-out)",
+        file=sys.stderr,
+    )
+    for url in urls:
+        try:
+            subprocess.run(
+                ["node", scrape_js, url, cache_root],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=120,
+                check=False,
+            )
+        except Exception:
+            # Best-effort: an on-demand scrape during the run still covers a miss
+            pass
+
+
 def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
              summarize, runs_per_fixture, workers, timeout, cwd,
              transcript_dir, summary_label,
@@ -1139,6 +1199,11 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
         ),
         file=sys.stderr,
     )
+
+    # Warm the shared DSC scrape cache serially BEFORE fanning out, so parallel
+    # workers hit a warm cache rather than all cold-scraping at once (the
+    # thundering herd that trips developer.salesforce.com rate-limiting)
+    _prewarm_dsc_cache(fixtures, get_query, skill_path)
 
     id_pairs = assign_fixture_ids(fixtures, get_fixture_id)
 

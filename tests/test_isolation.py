@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from stream_eval.isolation import (
+    ISOLATED_CACHE_DIR,
     SkillMetadataError,
     parse_skill_md_name,
     prepare_isolated_home,
@@ -117,6 +118,29 @@ def test_prepare_isolated_home_writes_settings_stub(tmp_path):
         # the spawn fall back to system defaults.
         assert "mcpServers" in data
         assert data["mcpServers"] == {}
+
+
+def test_prepare_isolated_home_shares_dsc_cache_across_runs(tmp_path, monkeypatch):
+    """The isolated HOME's .cache/dsc-scrape is a symlink to the shared
+    ISOLATED_CACHE_DIR, which SURVIVES cleanup: rmtree unlinks the symlink but
+    the shared cache (and anything written through it) persists, so warming
+    compounds across runs."""
+    # the real default lives OUTSIDE the user HOME (this is what keeps the
+    # hermetic-isolation guarantee intact; mirrors the no-symlink-into-~ test)
+    real_home = os.path.realpath(os.path.expanduser("~"))
+    assert not os.path.realpath(ISOLATED_CACHE_DIR).startswith(real_home + os.sep)
+    # redirect to tmp so the test never touches the real shared cache
+    shared = tmp_path / "shared-cache" / "dsc-scrape"
+    monkeypatch.setattr("stream_eval.isolation.ISOLATED_CACHE_DIR", str(shared))
+    skill = _make_skill(tmp_path, "skill-a")
+    with prepare_isolated_home(skill_path=skill, also_install=()) as (home, _name):
+        link = Path(home) / ".cache" / "dsc-scrape"
+        assert link.is_symlink()
+        assert os.path.realpath(str(link)) == os.path.realpath(str(shared))
+        (link / "warm.json").write_text("{}")  # write through the symlink
+    assert not Path(home).exists(), "temp HOME cleaned up"
+    assert shared.is_dir(), "shared cache survived rmtree"
+    assert (shared / "warm.json").read_text() == "{}", "warmed contents survived"
 
 
 def test_prepare_isolated_home_cleans_up_on_exit(tmp_path):

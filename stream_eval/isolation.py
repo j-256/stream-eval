@@ -21,6 +21,21 @@ import tempfile
 from pathlib import Path
 
 
+# Isolated spawns get a throwaway HOME (rmtree'd per run) and the DSC scrape
+# cache is $HOME-derived, so by default every isolated run scrapes cold and
+# shares nothing -- defeating the cache TTL and any pre-warm, and hammering
+# developer.salesforce.com under parallel workers. Point each isolated run's
+# ~/.cache/dsc-scrape at ONE persistent shared dir so warming compounds across
+# runs. Kept OUTSIDE the user's HOME (under the temp dir) so the isolated HOME
+# still shares nothing with the real ~ -- this is the harness's own dedicated
+# cache, never the operator's interactive ~/.cache/dsc-scrape. Survives across
+# runs (a stable name, not per-pid) so the reaper leaves it; the OS clears it
+# eventually, which is fine -- a cold session just re-warms serially
+ISOLATED_CACHE_DIR = os.path.join(
+    tempfile.gettempdir(), "stream-eval-cache", "dsc-scrape"
+)
+
+
 class SkillMetadataError(Exception):
     """Raised when a skill path's SKILL.md is missing, malformed, or
     lacks the required `name:` field."""
@@ -122,6 +137,13 @@ def prepare_isolated_home(*, skill_path, also_install=()):
             os.symlink(sib_path, skills_dir / sib_name)
         settings = Path(tmp) / ".claude" / "settings.json"
         settings.write_text(json.dumps(_SETTINGS_STUB, indent=2))
+        # Share one persistent DSC scrape cache across all isolated spawns
+        # (ISOLATED_CACHE_DIR). The symlink lives inside the throwaway HOME, so
+        # the rmtree below only unlinks it -- the shared cache and its TTL survive
+        os.makedirs(ISOLATED_CACHE_DIR, exist_ok=True)
+        cache_dir = Path(tmp) / ".cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        os.symlink(ISOLATED_CACHE_DIR, cache_dir / "dsc-scrape")
         yield (tmp, skill_name)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -11,12 +11,71 @@ from stream_eval.runner import (
     assign_fixture_ids,
     FixtureSchemaError,
     _format_progress,
+    _prewarm_dsc_cache,
     PROGRESS_LINE_RE,
     FINISH_BANNER_RE,
     format_finish_banner,
     format_startup_banner,
     STARTUP_BANNER_RE,
 )
+
+
+class TestPrewarmDscCache(unittest.TestCase):
+    """The pre-warm scans fixture queries for DSC reference URLs and warms them
+    serially before fan-out; it is a no-op when the skill ships no scrape lib or
+    the fixtures name no URLs."""
+
+    def _skill_with_scrape(self, tmp):
+        d = Path(tmp) / "skill"
+        (d / "lib" / "scrape").mkdir(parents=True)
+        (d / "lib" / "scrape" / "scrape.js").write_text("// stub")
+        return str(d)
+
+    def test_scans_dedups_strips_and_scrapes_named_refs(self):
+        import tempfile
+        from unittest.mock import patch
+        base = "https://developer.salesforce.com/docs/commerce/commerce-api/references"
+        fixtures = [
+            {"query": f"why does {base}/shopper-orders?meta=createOrder 400?"},
+            {"query": f"prereqs, see {base}/shopper-orders"},        # dup root
+            {"query": f"and {base}/shopper-baskets-v2, thanks"},
+        ]
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_scrape(tmp)
+            with patch("stream_eval.runner.subprocess.run",
+                       side_effect=lambda cmd, **kw: calls.append(cmd)), \
+                 patch("stream_eval.runner.ISOLATED_CACHE_DIR", str(Path(tmp) / "cache")), \
+                 patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "isolated"}):
+                _prewarm_dsc_cache(fixtures, lambda fx: fx["query"], skill)
+        urls = [c[2] for c in calls]
+        self.assertEqual(
+            sorted(urls),
+            sorted([f"{base}/shopper-orders", f"{base}/shopper-baskets-v2"]),
+            f"?meta stripped, deduped to reference roots; got {urls}",
+        )
+        self.assertTrue(
+            all(c[0] == "node" and c[1].endswith("scrape.js") for c in calls),
+            "each warm invokes node on the skill's scrape.js",
+        )
+
+    def test_noop_when_skill_lacks_scrape_lib(self):
+        from unittest.mock import patch
+        base = "https://developer.salesforce.com/docs/commerce/commerce-api/references"
+        with patch("stream_eval.runner.subprocess.run") as run:
+            _prewarm_dsc_cache([{"query": f"{base}/shopper-orders"}],
+                               lambda fx: fx["query"], "/nonexistent/skill")
+            run.assert_not_called()
+
+    def test_noop_when_no_urls(self):
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_scrape(tmp)
+            with patch("stream_eval.runner.subprocess.run") as run:
+                _prewarm_dsc_cache([{"query": "prose about shopper-orders, no url"}],
+                                   lambda fx: fx["query"], skill)
+                run.assert_not_called()
 
 
 class TestAssignFixtureIds(unittest.TestCase):
