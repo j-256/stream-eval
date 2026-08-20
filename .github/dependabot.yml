@@ -2,6 +2,7 @@ version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
+    target-branch: "source"
     schedule:
       interval: "weekly"
       day: "friday"

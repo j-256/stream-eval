@@ -30,7 +30,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-The `[dev]` extra adds `pytest` for the test suite. The `stream-eval` binary is on `$PATH` whenever the venv is active.
+The `[dev]` extra adds `pytest` for the test suite. The `stream-eval` binary is on `$PATH` whenever the venv is active. Development branches and pull requests start from stable `source`, not generated `main`; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Either way, verify install with:
 
