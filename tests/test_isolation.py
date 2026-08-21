@@ -101,6 +101,49 @@ def test_prepare_isolated_home_installs_siblings(tmp_path):
         assert (skills_dir / "skill-b").is_symlink()
 
 
+def test_prepare_isolated_codex_home_uses_agents_skills(tmp_path):
+    skill = _make_skill(tmp_path, "skill-a")
+
+    with prepare_isolated_home(
+        skill_path=skill,
+        also_install=(),
+        agent="codex",
+    ) as (home, name):
+        assert name == "skill-a"
+        installed = Path(home) / ".agents" / "skills" / "skill-a"
+        assert installed.is_symlink()
+        assert installed.resolve() == skill.resolve()
+        assert not (Path(home) / ".claude").exists()
+
+
+def test_prepare_isolated_opencode_home_uses_opencode_skills(tmp_path):
+    skill = _make_skill(tmp_path, "skill-a")
+
+    with prepare_isolated_home(
+        skill_path=skill,
+        also_install=(),
+        agent="opencode",
+    ) as (home, name):
+        assert name == "skill-a"
+        installed = Path(home) / ".opencode" / "skills" / "skill-a"
+        assert installed.is_symlink()
+        assert installed.resolve() == skill.resolve()
+        assert not (Path(home) / ".claude").exists()
+        assert not (Path(home) / ".agents").exists()
+
+
+def test_prepare_isolated_home_rejects_unknown_agent(tmp_path):
+    skill = _make_skill(tmp_path, "skill-a")
+
+    with pytest.raises(ValueError, match="unsupported isolation agent"):
+        with prepare_isolated_home(
+            skill_path=skill,
+            also_install=(),
+            agent="other",
+        ):
+            pass
+
+
 def test_prepare_isolated_home_writes_settings_stub(tmp_path):
     """The stub explicitly disables MCP servers so the spawn doesn't
     inherit anything from a system-wide /etc/claude/settings.json or
@@ -277,7 +320,7 @@ def test_parse_skill_md_name_strips_single_quotes(tmp_path):
 def test_env_overlay_reaches_child_process(tmp_path):
     """End-to-end check that the env dict passed to
     run_with_retry_aware_bail propagates HOME to the spawned child.
-    Uses /usr/bin/env (no claude -p needed) so it runs in CI."""
+    Uses /usr/bin/env (no agent CLI needed) so it runs in CI."""
     from stream_eval.subprocess import run_with_retry_aware_bail
 
     fake_home = tmp_path / "fake_home"
@@ -285,7 +328,7 @@ def test_env_overlay_reaches_child_process(tmp_path):
     transcript = tmp_path / "out.jsonl"
 
     # /usr/bin/env prints all env vars, one per line. We use it as a
-    # poor-man's `claude -p` for env propagation testing.
+    # Poor-man's agent CLI for env propagation testing
     bail = run_with_retry_aware_bail(
         cmd=["/usr/bin/env"],
         stdout_path=str(transcript),

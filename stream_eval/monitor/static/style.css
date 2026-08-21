@@ -50,8 +50,8 @@ header { display: flex; align-items: baseline; gap: 1rem;
 .dispatcher-state.paused { background: #ff9800; color: #fff; }
 .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Contaminated cells get a yellow outline regardless of pass/fail color
-   so an eval-Sonnet that polluted the worktree mid-run is visible at a
-   glance. The pass verdict on a contaminated run is unaudited. */
+   so an eval agent that polluted the worktree mid-run is visible at a
+   glance; the pass verdict on a contaminated run is unaudited */
 .cell.contaminated { outline: 2px solid #f9a825; outline-offset: -1px; }
 .controls {
   margin-top: 0.5rem; display: flex; gap: 0.5rem;

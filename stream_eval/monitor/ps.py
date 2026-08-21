@@ -1,4 +1,4 @@
-"""Process discovery and session detection for the dashboard.
+"""Process discovery and session detection for the dashboard
 
 Replaces the `ps -eo pid,ppid,etime,cmd` regex parsing in the legacy
 single-file monitor with psutil.Process accessors.
@@ -6,7 +6,7 @@ single-file monitor with psutil.Process accessors.
 Public surface:
 - find_eval_workers(): yield dicts describing live trigger/synthesis
   workers ({pid, ppid, kind, skill, eval_path, started_at, cmdline}).
-- detect_session(explicit=None): return the Claude Code session id
+- detect_session(explicit=None): return the parent agent session id
   the dashboard should pin to, using the layered fallback (explicit ->
   parent bash -> live worker -> recent .output file).
 - find_output_files(limit): return the youngest .output paths
@@ -19,6 +19,9 @@ import subprocess
 from pathlib import Path
 
 import psutil
+
+from stream_eval.agents import agent_for_executable
+from stream_eval.paths import output_dirs
 
 
 # Match the harness invocation in cmdline. Three forms:
@@ -90,10 +93,10 @@ _TRANSCRIPT_PATH_RE = re.compile(r"(\S+/transcripts/[^/]+/[^/]+\.jsonl)\b")
 _TRANSCRIPT_FILENAME_RE = re.compile(r"^(?P<fixture_id>.+)-(?P<run>\d+)\.jsonl$")
 
 
-def find_claude_workers_for(harness_pid):
-    """Yield one dict per live `claude -p` child of `harness_pid`.
+def find_agent_workers_for(harness_pid):
+    """Yield one dict per live agent CLI child of `harness_pid`.
 
-    Each harness spawns one or more `claude -p` subprocesses (one per
+    Each harness spawns one or more agent CLI subprocesses (one per
     in-flight fixture run). The dashboard surfaces them under the
     harness's row so the operator sees what's actually executing
     versus just the parent's existence.
@@ -104,7 +107,8 @@ def find_claude_workers_for(harness_pid):
     pulsing in-flight cells in the segmented bar.
 
     Fields per child:
-    - pid: claude subprocess pid
+    - pid: agent subprocess pid
+    - agent: selected agent adapter
     - started_at: psutil create_time (Unix epoch)
     - cmdline: full argv
     - fixture_id: parsed from the transcript filename, or None
@@ -126,7 +130,7 @@ def find_claude_workers_for(harness_pid):
     worker dicts to a sidecar JSON file when its scenarios include
     in-flight cells. If psutil yields no live children for harness_pid
     (the common case for fake harnesses, which are ledger-only) AND a
-    sidecar exists at any .workers.json under ~/.claude/projects/
+    sidecar exists under a stream-eval state directory
     matching this pid, those dicts are yielded. Real harnesses have
     no sidecars and never hit this path.
     """
@@ -146,13 +150,8 @@ def find_claude_workers_for(harness_pid):
             cmd = child.cmdline()
             if not cmd:
                 continue
-            # Match argv[0]'s basename exactly. The runner spawns
-            # `claude` (PATH-resolved) or an absolute path ending in
-            # `claude`. A substring-anywhere-in-argv[0..2] match would
-            # false-positive on the runner's own git subprocesses
-            # (e.g. `git --git-dir=/x/claude-code-skills/.git ...`),
-            # which it shells out to often during worktree management.
-            if Path(cmd[0]).name != "claude":
+            agent = agent_for_executable(cmd[0])
+            if agent is None:
                 continue
             transcript = _resolve_transcript(child)
             stats = _transcript_stats(transcript) if transcript else _empty_stats()
@@ -160,6 +159,7 @@ def find_claude_workers_for(harness_pid):
             real_yielded = True
             yield {
                 "pid": child.pid,
+                "agent": agent,
                 "started_at": child.create_time(),
                 "cmdline": cmd,
                 "fixture_id": fixture_id,
@@ -177,25 +177,29 @@ def find_claude_workers_for(harness_pid):
         yield from _yield_fake_workers_for(harness_pid)
 
 
+def find_claude_workers_for(harness_pid):
+    """Backward-compatible alias for find_agent_workers_for"""
+    yield from find_agent_workers_for(harness_pid)
+
+
 def _yield_fake_workers_for(harness_pid):
-    """Read .workers.json sidecars under ~/.claude/projects/ that
+    """Read .workers.json sidecars from stream-eval state directories that
     declare in-flight workers for this harness pid. Used by
     stream_eval.fake to inject simulated workers without needing real
     subprocesses; real harnesses don't write these files."""
-    home = Path.home()
-    base = home / ".claude" / "projects"
-    if not base.is_dir():
-        return
-    for path in base.rglob("*.workers.json"):
-        try:
-            with path.open() as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
+    for base in output_dirs():
+        if not base.is_dir():
             continue
-        if data.get("harness_pid") != harness_pid:
-            continue
-        for w in data.get("workers", []):
-            yield w
+        for path in base.rglob("*.workers.json"):
+            try:
+                with path.open() as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if data.get("harness_pid") != harness_pid:
+                continue
+            for worker in data.get("workers", []):
+                yield worker
 
 
 def _resolve_transcript(proc):
@@ -212,7 +216,7 @@ def _resolve_transcript(proc):
         m = _TRANSCRIPT_PATH_RE.search(f.path)
         if m:
             return m.group(1)
-    # psutil.open_files is empty on macOS for some claude processes;
+    # psutil.open_files is empty on macOS for some agent processes;
     # fall back to lsof, which the legacy monitor relied on.
     try:
         out = subprocess.run(
@@ -314,11 +318,11 @@ def _basename_or_none(p):
 
 
 def detect_session(explicit=None):
-    """Return the Claude Code session id the dashboard should pin to.
+    """Return the parent agent session id the dashboard should display.
 
     Layered fallback:
     1. explicit (from --session): returned as-is.
-    2. The dashboard's own bash parent's $CLAUDE_SESSION_ID env var.
+    2. The dashboard's own parent agent session environment.
     3. Any live trigger/synthesis worker's bash-parent session id.
     4. The youngest few .output files' session ids (capped to avoid
        walking thousands of historical files).
@@ -341,7 +345,7 @@ def detect_session(explicit=None):
 
 
 def _session_from_parent(pid):
-    """Walk up the parent chain looking for a CLAUDE_SESSION_ID env var.
+    """Walk up the parent chain looking for an agent session environment.
     Returns the session id, or None."""
     try:
         cur = psutil.Process(pid).parent()
@@ -353,9 +357,14 @@ def _session_from_parent(pid):
             env = cur.environ()
         except (psutil.AccessDenied, psutil.NoSuchProcess):
             env = {}
-        sid = env.get("CLAUDE_SESSION_ID")
-        if sid:
-            return sid
+        for key in (
+            "STREAM_EVAL_SESSION_ID",
+            "CLAUDE_SESSION_ID",
+            "CODEX_THREAD_ID",
+        ):
+            sid = env.get(key)
+            if sid:
+                return sid
         try:
             cur = cur.parent()
         except psutil.NoSuchProcess:
@@ -366,12 +375,11 @@ def _session_from_parent(pid):
 
 def _output_paths():
     """Iterate over .output files used as fallback session-detection input."""
-    home = Path.home()
-    base = home / ".claude" / "projects"
-    if not base.is_dir():
-        return
-    for p in base.rglob("*.output"):
-        yield p
+    for base in output_dirs():
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.output"):
+            yield path
 
 
 def _session_from_output_path(path):
@@ -390,7 +398,7 @@ def _session_from_output_path(path):
 
 
 def find_output_files(*, limit=None):
-    """Return the youngest .output paths under ~/.claude/projects.
+    """Return the youngest stream-eval .output paths.
 
     The legacy 4h time-window model produced surprises: a long-running
     eval on the previous day vanished from the dashboard mid-run, and

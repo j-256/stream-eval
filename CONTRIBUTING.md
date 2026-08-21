@@ -46,7 +46,7 @@ pytest -k "isolation"        # by name pattern
 pytest -v                    # verbose
 ```
 
-Tests that need a real `claude -p` invocation are marked with `@pytest.mark.integration` and skipped by default in CI.
+Tests that need a real agent CLI invocation are marked with `@pytest.mark.integration` and skipped by default in CI. Integration tests must name the adapter they require.
 
 ## Style
 

@@ -66,6 +66,27 @@ def test_parse_startup_banner_typical():
     assert parsed["workers"] == 4
     assert parsed["total_fixtures"] == 12
     assert parsed["pid"] == 42
+    assert parsed["agent"] == "claude"
+
+
+def test_parse_startup_banner_with_codex_agent():
+    line = (
+        "=== eval starting: kind=trigger agent=codex skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=3 workers=4 "
+        "total_fixtures=12 pid=42 ==="
+    )
+    parsed = parse_startup_banner(line)
+    assert parsed["agent"] == "codex"
+
+
+def test_parse_startup_banner_with_opencode_agent():
+    line = (
+        "=== eval starting: kind=trigger agent=opencode skill=dsc-scrape "
+        "eval=evals/dsc-scrape/trigger-eval.json runs=3 workers=4 "
+        "total_fixtures=12 pid=42 ==="
+    )
+    parsed = parse_startup_banner(line)
+    assert parsed["agent"] == "opencode"
 
 
 def test_parse_startup_banner_legacy_without_pid():
@@ -97,6 +118,25 @@ def test_parse_finish_banner_completed():
     assert parsed["skill"] == "dsc-scrape"
     assert parsed["pid"] == 42
     assert parsed["verdict"] == "completed"
+    assert parsed["agent"] == "claude"
+
+
+def test_parse_finish_banner_with_codex_agent():
+    line = (
+        "=== eval finished: kind=trigger agent=codex skill=dsc-scrape "
+        "pid=42 verdict=completed ==="
+    )
+    parsed = parse_finish_banner(line)
+    assert parsed["agent"] == "codex"
+
+
+def test_parse_finish_banner_with_opencode_agent():
+    line = (
+        "=== eval finished: kind=trigger agent=opencode skill=dsc-scrape "
+        "pid=42 verdict=completed ==="
+    )
+    parsed = parse_finish_banner(line)
+    assert parsed["agent"] == "opencode"
 
 
 def test_parse_finish_banner_aborted():

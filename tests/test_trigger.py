@@ -132,6 +132,64 @@ class TestScoreTriggerRun(unittest.TestCase):
             self.assertFalse(pass_, "over-fire on a decline fixture should fail")
             self.assertTrue(extra["triggered"])
 
+    def test_codex_skill_read_counts_as_trigger(self):
+        with tempfile.TemporaryDirectory() as td:
+            transcript = self._write_transcript(td, [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": (
+                            "sed -n '1,120p' "
+                            "/home/test/.agents/skills/dsc-triage/SKILL.md"
+                        ),
+                        "aggregated_output": "skill body",
+                        "exit_code": 0,
+                    },
+                },
+            ])
+            fixture = {"query": "q", "should_trigger": True}
+            bail = {"agent": "codex"}
+            pass_, extra = score_trigger_run(
+                fixture,
+                str(transcript),
+                bail,
+                target_skill="dsc-triage",
+            )
+            self.assertTrue(pass_)
+            self.assertTrue(extra["triggered"])
+            self.assertEqual(extra["first_action"], "skill")
+            self.assertEqual(extra["first_skill"], "dsc-triage")
+
+    def test_opencode_skill_tool_counts_as_trigger(self):
+        with tempfile.TemporaryDirectory() as td:
+            transcript = self._write_transcript(td, [
+                {
+                    "type": "tool_use",
+                    "sessionID": "session-1",
+                    "part": {
+                        "tool": "skill",
+                        "state": {
+                            "status": "completed",
+                            "input": {"name": "dsc-triage"},
+                        },
+                    },
+                },
+            ])
+            fixture = {"query": "q", "should_trigger": True}
+            bail = {"agent": "opencode"}
+            pass_, extra = score_trigger_run(
+                fixture,
+                str(transcript),
+                bail,
+                target_skill="dsc-triage",
+            )
+            self.assertTrue(pass_)
+            self.assertTrue(extra["triggered"])
+            self.assertEqual(extra["first_tool"], "skill")
+            self.assertEqual(extra["first_action"], "skill")
+            self.assertEqual(extra["first_skill"], "dsc-triage")
+
 
 class TestPreflightGuards(unittest.TestCase):
     """`stream-eval trigger --profile=isolated` (the default) without

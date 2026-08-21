@@ -13,6 +13,7 @@ from stream_eval.runner import (
     PROGRESS_LINE_RE as _PROGRESS_LINE_RE,
     STARTUP_BANNER_RE as _STARTUP_BANNER_RE,
 )
+from stream_eval.agents import DEFAULT_AGENT
 
 
 def parse_progress_line(line):
@@ -65,6 +66,7 @@ def parse_startup_banner(line):
     started_at_str = g.get("started_at")
     return {
         "kind": g["kind"],
+        "agent": g.get("agent") or DEFAULT_AGENT,
         "skill": g["skill"],
         "eval": g["eval"],
         "runs": int(g["runs"]),
@@ -94,6 +96,7 @@ def parse_finish_banner(line):
     finished_at_str = g.get("finished_at")
     return {
         "kind": g["kind"],
+        "agent": g.get("agent") or DEFAULT_AGENT,
         "skill": g["skill"],
         "pid": int(g["pid"]),
         "verdict": g["verdict"],

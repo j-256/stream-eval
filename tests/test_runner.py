@@ -2,14 +2,17 @@
 
 Run with: pytest tests/test_runner.py
 """
+import json
 import os
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
 from stream_eval.runner import (
     assign_fixture_ids,
     FixtureSchemaError,
+    _capture_transcript_artifacts,
     _format_progress,
     _prewarm_dsc_cache,
     PROGRESS_LINE_RE,
@@ -18,6 +21,35 @@ from stream_eval.runner import (
     format_startup_banner,
     STARTUP_BANNER_RE,
 )
+
+
+def test_capture_transcript_artifacts_reads_codex_temp_file(tmp_path):
+    with tempfile.TemporaryDirectory(
+        prefix="stream-eval-artifact-",
+    ) as output_dir:
+        output = Path(output_dir) / "demo.sh"
+        output.write_text("#!/bin/sh\nprintf demo\n")
+        transcript = tmp_path / "codex.jsonl"
+        transcript.write_text(
+            json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "file_change",
+                    "changes": [{"path": str(output), "kind": "add"}],
+                },
+            }) + "\n"
+        )
+
+        artifacts = _capture_transcript_artifacts(
+            transcript,
+            agent="codex",
+            cwd=tmp_path / "unrelated-worktree",
+        )
+
+        assert artifacts == [{
+            "path": str(output),
+            "content": "#!/bin/sh\nprintf demo\n",
+        }]
 
 
 class TestPrewarmDscCache(unittest.TestCase):
@@ -480,7 +512,6 @@ class TestFinishBanner(unittest.TestCase):
         self.assertIsNone(m.group("finished_at"))
 
 
-import tempfile
 import threading
 import time
 import unittest.mock as mock
@@ -489,9 +520,9 @@ from stream_eval.runner import run_eval
 
 
 class TestRunEvalAbortOnTimeout(unittest.TestCase):
-    """The runner must cancel pending futures and exit 3 when the first
-    completed run reports timed_out=True. Validates the abort policy
-    without spawning real claude -p subprocesses.
+    """The runner must cancel pending futures and exit 3 when a completed
+    run reports an upstream-poisoned timeout. Validates the abort policy
+    without spawning real agent CLI subprocesses.
 
     Tests pass executor_class=ThreadPoolExecutor so mock.patch reaches
     the workers (process-pool workers run in separate processes and
@@ -515,7 +546,7 @@ class TestRunEvalAbortOnTimeout(unittest.TestCase):
 
     def test_abort_cancels_remaining_runs(self):
         # Three fixtures, runs_per_fixture=2 -> six tasks. The first
-        # scored task reports timed_out=True; the runner must cancel
+        # scored task reports retry-budget exhaustion; the runner must cancel
         # remaining futures so far fewer than six run total.
         # Subsequent mock calls block on a gate to remain reliably
         # cancellable: without the gate, fast mock returns let the
@@ -721,7 +752,7 @@ from stream_eval.runner import (
 
 class TestWorktreeIsolationPrimitives(unittest.TestCase):
     """End-to-end coverage of the snapshot/diff/restore primitives that
-    _spawn_and_bail uses to detect and remediate eval-Sonnet
+    _spawn_and_bail uses to detect and remediate eval-agent
     contamination. Each test materialises a real local git repo via
     `git init` and tests against it; the primitives talk to git directly
     rather than parsing porcelain in pure Python, so a real-repo fixture
@@ -858,8 +889,8 @@ class TestWorktreeIsolationPrimitives(unittest.TestCase):
 class TestSpawnAndBailWorktreeProtection(unittest.TestCase):
     """End-to-end coverage of the snapshot/restore cycle wired into
     _spawn_and_bail. Patches run_with_retry_aware_bail to simulate a
-    `claude -p` spawn that mutates a tracked file mid-call (the
-    eval-Sonnet contamination shape iteration-resolve-slug-fallback-rejected
+    agent CLI spawn that mutates a tracked file mid-call (the
+    eval-agent contamination shape iteration-resolve-slug-fallback-rejected
     diagnosed). Validates the integration the unit tests exercise in
     isolation: detection runs, restore runs, contamination flag and
     paths reach the bail dict.
@@ -891,7 +922,9 @@ class TestSpawnAndBailWorktreeProtection(unittest.TestCase):
     def test_spawn_clean_run_reports_uncontaminated(self):
         from stream_eval.runner import _spawn_and_bail
 
-        def fake_spawn(cmd, transcript_path, env, cwd, timeout):
+        def fake_spawn(
+            cmd, transcript_path, env, cwd, timeout, classify_event=None,
+        ):
             Path(transcript_path).write_text(
                 '{"type":"result","result":"ok"}\n'
             )
@@ -927,7 +960,9 @@ class TestSpawnAndBailWorktreeProtection(unittest.TestCase):
         operator_wip = Path(self.tmpdir, "skills", "operator-wip.js")
         operator_wip.write_text("// in-flight edit\n")  # untracked, dirty
 
-        def fake_spawn(cmd, transcript_path, env, cwd, timeout):
+        def fake_spawn(
+            cmd, transcript_path, env, cwd, timeout, classify_event=None,
+        ):
             Path(transcript_path).write_text(
                 '{"type":"result","result":"ok"}\n'
             )
@@ -967,7 +1002,7 @@ class TestWorkerWorktreeLifecycle(unittest.TestCase):
     """Unit coverage for the per-spawn worktree create/destroy primitives.
 
     These replace the v2 detection-and-restore primitives that proved
-    self-destructive: when eval-Sonnet ran `git checkout -b` on the
+    self-destructive: when an eval agent ran `git checkout -b` on the
     operator's repo, _restore_branch_state's `git checkout --force`
     discarded the operator's WIP -- including the harness source files
     being edited mid-development. Worktree-per-spawn makes that
@@ -1078,7 +1113,7 @@ class TestWorkerWorktreeLifecycle(unittest.TestCase):
                          "worktree should be unregistered")
 
     def test_destroy_succeeds_with_dirty_worktree(self):
-        """Force-remove handles the contamination case: eval-Sonnet
+        """Force-remove handles the contamination case: an eval agent
         edits/clones/branches inside the worktree, then we destroy.
         Without --force, `git worktree remove` would refuse on dirty
         state and leave the operator with stale registrations."""
@@ -1224,12 +1259,14 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
     def test_spawn_runs_in_worktree_not_operator_repo(self):
         """The cwd passed to run_with_retry_aware_bail must be the
         worktree path, not the operator repo. This is what makes
-        eval-Sonnet's `git checkout -b` (and similar) target the
+        an eval agent's `git checkout -b` (and similar) target the
         ephemeral worktree instead of clobbering operator state."""
         from stream_eval.runner import _spawn_and_bail
         captured_cwds = []
 
-        def fake_spawn(cmd, transcript_path, env, cwd, timeout):
+        def fake_spawn(
+            cmd, transcript_path, env, cwd, timeout, classify_event=None,
+        ):
             captured_cwds.append(cwd)
             Path(transcript_path).write_text(
                 '{"type":"result","result":"ok"}\n'
@@ -1265,16 +1302,18 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
         worktree. Operator repo must end byte-identical to start.
 
         The worktree is now locked read-only before the spawn runs;
-        a determined eval-Sonnet that bypasses the lock (e.g. via
+        a determined eval agent that bypasses the lock (e.g. via
         `chmod u+w` in Bash, then writes) is the worst case we still
         have to be safe against. This test simulates exactly that:
         chmod the targets writable, then write, then verify the
         operator repo is untouched."""
         from stream_eval.runner import _spawn_and_bail
 
-        def fake_spawn(cmd, transcript_path, env, cwd, timeout):
-            # Eval-Sonnet bypasses the lock to enact the contamination
-            # workflow inside the worktree. Real Sonnet could do this
+        def fake_spawn(
+            cmd, transcript_path, env, cwd, timeout, classify_event=None,
+        ):
+            # The eval agent bypasses the lock to enact contamination
+            # inside the worktree. A real agent could do this
             # via Bash; the test does it directly for determinism.
             module_js = Path(cwd, "skills", "module.js")
             os.chmod(module_js, 0o644)
@@ -1346,7 +1385,9 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
         bail dict's contamination flag False."""
         from stream_eval.runner import _spawn_and_bail
 
-        def fake_spawn(cmd, transcript_path, env, cwd, timeout):
+        def fake_spawn(
+            cmd, transcript_path, env, cwd, timeout, classify_event=None,
+        ):
             Path(transcript_path).write_text(
                 '{"type":"result","result":"ok"}\n'
             )
@@ -1382,7 +1423,9 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
         detection still works when the lock is circumvented."""
         from stream_eval.runner import _spawn_and_bail
 
-        def fake_spawn(cmd, transcript_path, env, cwd, timeout):
+        def fake_spawn(
+            cmd, transcript_path, env, cwd, timeout, classify_event=None,
+        ):
             module_js = Path(cwd, "skills", "module.js")
             os.chmod(module_js, 0o644)
             os.chmod(Path(cwd, "skills"), 0o755)
@@ -1420,7 +1463,9 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
 
         write_attempts = []
 
-        def fake_spawn(cmd, transcript_path, env, cwd, timeout):
+        def fake_spawn(
+            cmd, transcript_path, env, cwd, timeout, classify_event=None,
+        ):
             # Attempt the naive contamination shape (no lock bypass).
             try:
                 Path(cwd, "skills", "module.js").write_text("naive\n")
@@ -1471,7 +1516,9 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
 
         seen_content = []
 
-        def fake_spawn(cmd, transcript_path, env, cwd, timeout):
+        def fake_spawn(
+            cmd, transcript_path, env, cwd, timeout, classify_event=None,
+        ):
             # The eval reads the worktree's copy of the file.
             seen_content.append(
                 Path(cwd, "skills", "module.js").read_text()
@@ -1505,6 +1552,52 @@ class TestSpawnAndBailWorktreeIsolation(unittest.TestCase):
         self.assertEqual(
             Path(self.tmpdir, "skills", "module.js").read_text(),
             "OPERATOR WIP -- harness self-edit\n",
+        )
+
+    def test_writable_spawn_captures_artifacts_and_flags_tracked_edits(self):
+        from stream_eval.runner import _spawn_and_bail
+
+        def fake_spawn(
+            cmd, transcript_path, env, cwd, timeout, classify_event=None,
+        ):
+            Path(cwd, "generated.txt").write_text("new artifact\n")
+            Path(cwd, "skills", "module.js").write_text("changed artifact\n")
+            Path(transcript_path).write_text(
+                '{"type":"result","result":"ok"}\n'
+            )
+            return {
+                "retry_budget_exhausted": False,
+                "wall_timed_out": False,
+                "total_retries": 0,
+                "latest_attempt": 0,
+                "max_retries_field": 0,
+                "exit_code": 0,
+            }
+
+        with mock.patch.dict(os.environ, {"STREAM_EVAL_PROFILE": "inherit"}):
+            with mock.patch(
+                "stream_eval.runner.run_with_retry_aware_bail",
+                side_effect=fake_spawn,
+            ):
+                with tempfile.NamedTemporaryFile(suffix=".jsonl") as tf:
+                    bail = _spawn_and_bail(
+                        "fake query",
+                        tf.name,
+                        timeout=30,
+                        cwd=self.tmpdir,
+                        allow_worktree_writes=True,
+                    )
+
+        artifacts = {item["path"]: item["content"] for item in bail["artifacts"]}
+        self.assertEqual(artifacts["generated.txt"], "new artifact\n")
+        self.assertEqual(
+            artifacts["skills/module.js"],
+            "changed artifact\n",
+        )
+        self.assertTrue(bail["worktree_contaminated"])
+        self.assertEqual(
+            bail["worktree_changed_paths"],
+            ["skills/module.js"],
         )
 
 
@@ -1629,7 +1722,7 @@ class TestRunEvalEnvelope(unittest.TestCase):
     numbers to a specific harness commit."""
 
     def test_run_eval_writes_harness_version_to_results(self):
-        """Run an empty fixture set so no real claude -p is invoked.
+        """Run an empty fixture set so no real agent CLI is invoked.
         The envelope is built regardless of whether any tasks ran."""
         from stream_eval import runner
 

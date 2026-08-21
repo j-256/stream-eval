@@ -1,12 +1,13 @@
 {% if active_workers %}
   <table>
     <thead><tr>
-      <th>claude pid</th><th>fixture</th><th>run</th><th>started</th>
+      <th>agent</th><th>pid</th><th>fixture</th><th>run</th><th>started</th>
       <th>retries</th><th>attempt</th><th>last error</th>
     </tr></thead>
     <tbody>
       {% for w in active_workers %}
       <tr>
+        <td>{{ w.agent or 'agent' }}</td>
         <td>{{ w.pid }}</td>
         <td>{{ w.fixture_id or '(starting)' }}</td>
         <td>{{ w.run if w.run is not none else '-' }}</td>
@@ -25,5 +26,5 @@
     </tbody>
   </table>
 {% else %}
-  <p class="empty">No active claude workers.</p>
+  <p class="empty">No active agent workers.</p>
 {% endif %}

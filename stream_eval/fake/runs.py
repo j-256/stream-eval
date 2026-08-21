@@ -1,11 +1,10 @@
-"""Scenario builders + FakeState handle.
+"""Scenario builders and FakeState handle
 
 Each scenario synthesizes an .output file (via runner.format_*_banner
 and runner._format_progress so the format stays in sync with the
 real runner) and optionally starts a FakeSocketServer for an active
-harness. The output files live under a base_dir that mirrors the
-real ~/.claude/projects/<project-slug>/ layout so find_output_files
-walks them naturally.
+harness. The output files live under a stream-eval state directory so
+find_output_files discovers them naturally.
 
 Adding a scenario:
 1. Write a `_scenario_<name>(builder)` function that calls
@@ -14,12 +13,9 @@ Adding a scenario:
 2. Register it in SCENARIOS at the bottom.
 3. Add a test in tests/test_fake.py.
 
-The dashboard reads .output files from ~/.claude/projects via
-ps._output_paths -> find_output_files. To make a fake scenario
-visible to a real dashboard, call make_fake_state() and then point
-the dashboard at the temp dir, e.g. by patching ps._output_paths
-in tests, or by symlinking the temp dir under ~/.claude/projects
-for interactive smoke testing (the __main__ entry handles this).
+The dashboard reads .output files from stream-eval state directories via
+ps._output_paths -> find_output_files. The interactive entry point places
+fixtures in the primary state directory automatically.
 """
 import json
 import os
@@ -27,6 +23,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from stream_eval.agents import DEFAULT_AGENT
 from stream_eval.fake.socket_server import FakeSocketServer
 from stream_eval.runner import (
     _format_progress,
@@ -159,7 +156,8 @@ class _Builder:
     def start_eval(self, *, skill, kind, total_fixtures, runs,
                    workers=4, eval_path=None, pid=None,
                    live_socket=False, file_name=None, in_flight=0,
-                   in_flight_retries_per_pid=0, dead_pid=False):
+                   in_flight_retries_per_pid=0, dead_pid=False,
+                   agent=DEFAULT_AGENT):
         """Open an .output file with a startup banner. Returns an
         _EvalHandle the caller fills with progress lines and an
         optional finish banner.
@@ -170,7 +168,7 @@ class _Builder:
         seeded from the `workers` arg.
 
         If in_flight > 0, write a sidecar .workers.json describing
-        that many fake claude pids -- the dashboard's psutil walk
+        that many fake agent pids -- the dashboard's psutil walk
         finds nothing (these pids don't actually exist) and falls
         back to the sidecar, which lets fake scenarios render the
         pulsing in-flight cells and the retries-in-flight counter
@@ -202,7 +200,7 @@ class _Builder:
             f.write(format_startup_banner(
                 kind=kind, skill=skill, eval_path=eval_path,
                 runs=runs, workers=workers,
-                total_fixtures=total_fixtures, pid=pid,
+                total_fixtures=total_fixtures, pid=pid, agent=agent,
             ) + "\n")
         self.output_paths.append(out_path)
         if live_socket:
@@ -215,17 +213,18 @@ class _Builder:
             self._write_workers_sidecar(
                 pid=pid, count=in_flight,
                 retries_per_pid=in_flight_retries_per_pid,
-                file_name=file_name,
+                file_name=file_name, agent=agent,
             )
         return _EvalHandle(
             out_path=out_path, pid=pid, skill=skill, kind=kind,
             total_fixtures=total_fixtures, runs=runs,
+            agent=agent,
         )
 
     def _write_workers_sidecar(self, *, pid, count, retries_per_pid,
-                                file_name):
+                                file_name, agent):
         """Write a <file_name>.workers.json sidecar that the dashboard's
-        find_claude_workers_for fallback path consumes."""
+        agent-worker fallback path consumes."""
         import time
         sidecar = self.base_dir / f"{file_name}.workers.json"
         now = time.time()
@@ -234,10 +233,10 @@ class _Builder:
             fake_pid = pid * 100 + i + 1
             workers.append({
                 "pid": fake_pid,
+                "agent": agent,
                 "started_at": now - (i * 5 + 5),
                 "cmdline": [
-                    "claude", "-p", "--output-format", "stream-json",
-                    "fake fixture query",
+                    agent, "fake fixture query",
                 ],
                 "fixture_id": f"q{i}",
                 "run": 1,
@@ -256,13 +255,14 @@ class _EvalHandle:
     completed run, optionally a finish banner."""
 
     def __init__(self, *, out_path, pid, skill, kind,
-                 total_fixtures, runs):
+                 total_fixtures, runs, agent):
         self.out_path = out_path
         self.pid = pid
         self.skill = skill
         self.kind = kind
         self.total_fixtures = total_fixtures
         self.runs = runs
+        self.agent = agent
         self.completed = 0
         self.total_runs = total_fixtures * runs
 
@@ -291,7 +291,7 @@ class _EvalHandle:
         with self.out_path.open("a") as f:
             f.write(format_finish_banner(
                 kind=self.kind, skill=self.skill,
-                verdict=verdict, pid=self.pid,
+                verdict=verdict, pid=self.pid, agent=self.agent,
             ) + "\n")
 
 
@@ -301,7 +301,7 @@ def _scenario_active_clean(b):
     h = b.start_eval(
         skill="dsc-scrape", kind="trigger",
         total_fixtures=10, runs=1, live_socket=True,
-        in_flight=2,
+        in_flight=2, agent="opencode",
     )
     for i in range(3):
         h.complete_run(fixture_id=f"q{i}", run=1, pass_=True,

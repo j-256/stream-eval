@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Trigger-accuracy eval harness for skills.
+"""Trigger-accuracy eval harness for skills
 
-Fires claude -p runs and scores the first tool invocation.
-
-For each query in the eval set, spawn N runs of `claude -p --model sonnet
-<query>` in parallel. Parse the stream-json output; a run counts as
-"triggered" iff the first tool_use event is the `Skill` tool with input
-`{"skill": "<target-skill>"}`. Anything else (different skill, different
-tool, text-only answer) counts as "not triggered."
+Fires the selected agent and scores its first normalized action. A run counts
+as triggered when that action activates the target skill. Each adapter owns
+the host-specific activation signal.
 
 A query passes when its trigger rate meets its `should_trigger` expectation
 with a 0.5 threshold.
@@ -52,8 +48,14 @@ import sys
 import threading
 from pathlib import Path
 
+from stream_eval.agents import (
+    DEFAULT_AGENT,
+    SUPPORTED_AGENTS,
+    SUPPORTED_PROFILES,
+)
 from stream_eval.control import install_signal_handlers, serve_socket
 from stream_eval.runner import run_eval
+from stream_eval.transcript import parse_transcript
 
 
 class FixtureSchemaError(Exception):
@@ -131,33 +133,20 @@ def score_trigger_run(fixture, transcript_path, bail, *, target_skill):
     carries the raw `triggered` boolean so callers that need the
     underlying signal can read it directly.
     """
-    first_tool = None
-    first_skill = None
-    with open(transcript_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            if d.get("type") != "assistant":
-                continue
-            for c in d.get("message", {}).get("content", []):
-                if c.get("type") == "tool_use":
-                    first_tool = c.get("name")
-                    if first_tool == "Skill":
-                        first_skill = c.get("input", {}).get("skill", "")
-                    break
-            if first_tool is not None:
-                break
-
-    triggered = (first_tool == "Skill" and first_skill == target_skill)
+    parsed = parse_transcript(
+        transcript_path,
+        agent=bail.get("agent", DEFAULT_AGENT),
+        known_skills=(target_skill,),
+    )
+    first_tool = parsed.tool_uses[0].name if parsed.tool_uses else None
+    first_action = parsed.first_action.name if parsed.first_action else None
+    first_skill = parsed.first_skill
+    triggered = (first_action == "skill" and first_skill == target_skill)
     matched_expected = (triggered == fixture.get("should_trigger", True))
     return matched_expected, {
         "triggered": triggered,
         "first_tool": first_tool,
+        "first_action": first_action,
         "first_skill": first_skill,
     }
 
@@ -184,16 +173,26 @@ def main(argv=None):
     ap.add_argument("--timeout", type=int, default=300,
                     help="Per-run wall-clock backstop in seconds "
                          "(default 300). Measures effective model-thinking "
-                         "time only -- retry-backoff windows are excluded. "
-                         "Primary bail signal is api_retry budget exhaustion.")
+                         "time; adapter-reported retry-backoff windows are "
+                         "excluded.")
     ap.add_argument("--cwd", default=None,
-                    help="CWD for claude -p subprocesses (default: current dir)")
+                    help="CWD for agent subprocesses (default: current dir)")
     ap.add_argument(
-        "--profile", choices=["isolated", "restricted", "inherit"],
-        default="isolated",
-        help="Toolbelt profile for the spawned claude -p. 'isolated' "
+        "--agent",
+        choices=SUPPORTED_AGENTS,
+        default=os.environ.get("STREAM_EVAL_AGENT", DEFAULT_AGENT),
+        help=(
+            "Agent CLI backend (default: STREAM_EVAL_AGENT or "
+            f"{DEFAULT_AGENT})"
+        ),
+    )
+    ap.add_argument(
+        "--profile", choices=SUPPORTED_PROFILES,
+        default=os.environ.get("STREAM_EVAL_PROFILE", "isolated"),
+        help="Isolation profile for the spawned agent. 'isolated' "
              "(default) uses a temp HOME with only the skill under test; "
-             "'restricted' uses the user's real HOME but strips MCP/Agent; "
+             "'restricted' uses the user's real HOME but strips MCP and "
+             "subagents; "
              "'inherit' runs with the user's full environment.",
     )
     ap.add_argument("--out", required=True)
@@ -295,6 +294,7 @@ def main(argv=None):
             eval_path=args.eval,
             skill_path=skill_path,
             also_install=also_install,
+            agent=args.agent,
         )
 
         results["skill_name"] = skill_name

@@ -2,6 +2,8 @@
 
 The `skill-creator` plugin (bundled with Claude Code) ships its own evaluation tooling. This doc explains how it differs from stream-eval and what we tested to validate the choice of building a separate harness. Short version:
 
+This is a historical Claude Code backend study. Its commands, measurements, and conclusions describe that backend-specific experiment; the stream-eval runner now also supports Codex and OpenCode through separate adapters.
+
 - `skill-creator`'s **outer workflow** (the SKILL.md-driven flow) is a per-skill, human-in-the-loop design tool. It tests skills end-to-end via real subagents and a browser-based qualitative review. stream-eval doesn't replace it; the two tools answer different questions.
 - `skill-creator`'s **`scripts/run_eval.py`** is a narrowly-scoped trigger-eval used by the description-optimization sub-flow. stream-eval's `trigger` command covers the same ground with safer defaults and is wrapped in additional tooling (synthesis evals, dashboard, contamination detection, throttle protocol) that `run_eval.py` doesn't address.
 

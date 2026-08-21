@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Claude Code, Codex, and OpenCode adapters behind the shared `--agent` interface.
+- Portable transcript actions and cross-agent synthesis assertions for action inputs, action sequences, and generated artifacts.
+- Agent-neutral dashboard state storage with legacy Claude output discovery.
 - Flask + Jinja2 + psutil dashboard, decomposed into a monitor/ subpackage:
   monitor/app.py (Flask routes), monitor/state.py (DashboardState),
   monitor/ps.py (psutil-based discovery + session detection),
@@ -38,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Legacy test_monitor.py (replaced by per-submodule tests).
 
 ### Changed
+- Results and dashboard banners identify the selected agent and model setting.
+- Synthesis runs capture disposable worktree artifacts while retaining tracked-file contamination detection.
 - Renamed `DSC_EVAL_MODEL` -> `STREAM_EVAL_MODEL` and `DSC_EVAL_PROFILE` -> `STREAM_EVAL_PROFILE`.
 - Hyphenated CLI scripts (`trigger-eval.py` etc.) are now Python modules under `stream_eval/`.
 - `--skill-name` is now optional; defaults to the `name:` field in `<skill-path>/SKILL.md`.

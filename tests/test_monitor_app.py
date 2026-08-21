@@ -412,11 +412,11 @@ def test_active_row_retries_persist_from_completed_runs(tmp_path):
         "first_skill=dsc-scrape failed_asserts=0 contaminated=False"
         ": q\n"
     )
-    # No live workers (find_claude_workers_for returns nothing), pid
+    # No live workers (find_agent_workers_for returns nothing), pid
     # alive so the row is active.
     with mock.patch("stream_eval.monitor.app.find_output_files",
                     return_value=[output]), \
-         mock.patch("stream_eval.monitor.app.find_claude_workers_for",
+         mock.patch("stream_eval.monitor.app.find_agent_workers_for",
                     return_value=[]), \
          mock.patch("stream_eval.monitor.state._default_is_pid_alive",
                     side_effect=lambda pid: pid == 44440):
@@ -481,7 +481,7 @@ def test_zero_retry_active_row_omits_retry_count(tmp_path):
     )
     with mock.patch("stream_eval.monitor.app.find_output_files",
                     return_value=[output]), \
-         mock.patch("stream_eval.monitor.app.find_claude_workers_for",
+         mock.patch("stream_eval.monitor.app.find_agent_workers_for",
                     return_value=[]), \
          mock.patch("stream_eval.monitor.state._default_is_pid_alive",
                     side_effect=lambda pid: pid == 44442):

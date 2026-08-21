@@ -1,9 +1,9 @@
 """Shared eval-runner library for stream_eval.trigger and stream_eval.synthesis.
 
-Owns: Dispatcher-based dispatch, abort-on-first-timeout, the canonical
+Owns: Dispatcher-based dispatch, retry-aware timeout handling, the canonical
 stderr progress line, the startup banner, the results-JSON envelope,
-fixture-id assignment with collision detection, worktree-isolation
-detect+restore around each spawn.
+fixture-id assignment with collision detection, and a disposable
+worktree around each spawn.
 
 Does NOT own: fixture schemas, scoring (trigger vs. assertion), per-kind
 defaults, transcript JSONL persistence (synthesis-only behavior toggled
@@ -23,19 +23,20 @@ import threading
 import time
 from pathlib import Path
 
+from stream_eval.agents import DEFAULT_AGENT, get_agent_adapter
 from stream_eval.pool import Dispatcher, DispatcherState
 
 from stream_eval.env import load_dotenv
 from stream_eval.isolation import prepare_isolated_home, ISOLATED_CACHE_DIR
+from stream_eval.paths import state_dir
 from stream_eval.subprocess import run_with_retry_aware_bail
+from stream_eval.transcript import parse_transcript
 
 load_dotenv()
-EVAL_MODEL = os.environ.get("STREAM_EVAL_MODEL", "sonnet")
-# Optional reasoning-effort level (low|medium|high|xhigh|max) forwarded to
-# `claude -p --effort`. Unset -> the flag is omitted and the CLI uses the model's
-# default effort (e.g. Sonnet 5 defaults to high), preserving prior behavior.
-# Mirrors STREAM_EVAL_MODEL: read from the environment or a gap-filled .env.
+EVAL_MODEL = os.environ.get("STREAM_EVAL_MODEL")
+# Optional reasoning effort translated by the selected agent adapter
 EVAL_EFFORT = os.environ.get("STREAM_EVAL_EFFORT")
+MAX_ARTIFACT_BYTES = 1024 * 1024
 
 # Set during run_eval; signal handlers and socket listeners use this
 # to adjust the running dispatcher's target_workers / state. None when
@@ -136,31 +137,6 @@ def _resolve_harness_version(package_dir=None):
     return ("unknown", "unknown")
 
 
-# MCP and Agent strip flags. Used by both `isolated` and `restricted`
-# profiles below; pulled out to a constant so the two stay in sync if the
-# strip set ever changes.
-_STRIP_MCP_AGENT_FLAGS = [
-    "--strict-mcp-config",
-    "--mcp-config", '{"mcpServers":{}}',
-    "--disallowedTools", "Agent",
-]
-
-# Three profiles, semantically distinct:
-# - isolated (default): temp HOME containing ONLY the skill under test;
-#   --strict-mcp-config and --disallowedTools Agent strip MCP/Agent.
-#   Production-equivalent for a vanilla install.
-# - restricted: user's real HOME; same MCP/Agent strip flags. Tests a
-#   skill against the user's other globally-installed skills but without
-#   MCP/Agent.
-# - inherit: user's real HOME; no flags stripped. Closest to interactive
-#   use; useful for diagnostic runs.
-PROFILE_FLAGS = {
-    "isolated": _STRIP_MCP_AGENT_FLAGS,
-    "restricted": _STRIP_MCP_AGENT_FLAGS,
-    "inherit": [],
-}
-
-
 class FixtureSchemaError(Exception):
     pass
 
@@ -242,9 +218,8 @@ def _format_progress(*, n, total, kind, pass_, fixture_id, run_idx,
       - failed_asserts=0 for trigger runs (which have no assertions)
         and for synthesis runs where every assertion passed
       - contaminated=True iff the spawn left the worktree dirtier than
-        it found it (eval-Sonnet edited a tracked source file or
-        created a new untracked file). A True value means the run's
-        pass verdict is unaudited.
+        it found it (the eval agent edited a tracked source file). A True
+        value means the run's pass verdict is unaudited.
     """
     q_disp = query.replace("\n", " ")[:QUERY_DISPLAY_MAX]
     return (
@@ -267,6 +242,7 @@ def _format_progress(*, n, total, kind, pass_, fixture_id, run_idx,
 STARTUP_BANNER_RE = re.compile(
     r"^\s*=== eval starting: "
     r"kind=(?P<kind>trigger|synthesis)\s+"
+    r"(?:agent=(?P<agent>claude|codex|opencode)\s+)?"
     r"skill=(?P<skill>\S+)\s+"
     r"eval=(?P<eval>\S+)\s+"
     r"runs=(?P<runs>\d+)\s+"
@@ -291,6 +267,7 @@ STARTUP_BANNER_RE = re.compile(
 FINISH_BANNER_RE = re.compile(
     r"^\s*=== eval finished: "
     r"kind=(?P<kind>trigger|synthesis)\s+"
+    r"(?:agent=(?P<agent>claude|codex|opencode)\s+)?"
     r"skill=(?P<skill>\S+)\s+"
     r"pid=(?P<pid>\d+)\s+"
     r"verdict=(?P<verdict>completed|aborted)"
@@ -302,7 +279,7 @@ FINISH_BANNER_RE = re.compile(
 
 
 def format_finish_banner(*, kind, skill, verdict, pid=None,
-                         finished_at=None):
+                         finished_at=None, agent=None):
     """The runner emits this to stderr after the last task finishes.
 
     verdict is "completed" if every dispatched task scored (pass or
@@ -322,9 +299,11 @@ def format_finish_banner(*, kind, skill, verdict, pid=None,
         pid = os.getpid()
     if finished_at is None:
         finished_at = time.time()
+    agent_field = f"agent={agent} " if agent else ""
     return (
         f"=== eval finished: "
         f"kind={kind} "
+        f"{agent_field}"
         f"skill={skill} "
         f"pid={pid} "
         f"verdict={verdict} "
@@ -333,7 +312,8 @@ def format_finish_banner(*, kind, skill, verdict, pid=None,
 
 
 def format_startup_banner(*, kind, skill, eval_path, runs, workers,
-                          total_fixtures, pid=None, started_at=None):
+                          total_fixtures, pid=None, started_at=None,
+                          agent=None):
     """The runner emits this to stderr before the first task completes.
 
     stream_eval.monitor parses it from each .output file to bind finished
@@ -353,9 +333,11 @@ def format_startup_banner(*, kind, skill, eval_path, runs, workers,
         pid = os.getpid()
     if started_at is None:
         started_at = time.time()
+    agent_field = f"agent={agent} " if agent else ""
     return (
         f"=== eval starting: "
         f"kind={kind} "
+        f"{agent_field}"
         f"skill={skill} "
         f"eval={eval_path} "
         f"runs={runs} "
@@ -368,12 +350,7 @@ def format_startup_banner(*, kind, skill, eval_path, runs, workers,
 
 def _install_stderr_tee():
     """Replace sys.stderr with a tee that forwards to the original
-    stderr AND to ~/.claude/projects/stream-eval/<harness-pid>.output.
-
-    The dashboard's find_output_files walks ~/.claude/projects/ for
-    *.output files. Without this tee, real evals are invisible to the
-    dashboard because Claude Code's Bash tool puts background-process
-    stderr under /tmp/claude-501/, which the dashboard doesn't scan.
+    stderr and the agent-neutral stream-eval state directory.
 
     Idempotent: a second call is a no-op (we set a flag on the wrapped
     stream). Failures are silently swallowed because dashboard
@@ -384,7 +361,7 @@ def _install_stderr_tee():
     if getattr(sys.stderr, "_stream_eval_teed", False):
         return
     try:
-        log_dir = Path.home() / ".claude" / "projects" / "stream-eval"
+        log_dir = state_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{os.getpid()}.output"
         log_file = open(log_path, "w", buffering=1)  # line-buffered
@@ -450,7 +427,7 @@ def _git_dirty_set(cwd):
     cannot honestly claim "no contamination."
     """
     proc = subprocess.run(
-        ["git", "status", "--porcelain=v1", "-z"],
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
         cwd=cwd, capture_output=True, check=True, text=False,
     )
     out = proc.stdout
@@ -480,6 +457,106 @@ def _git_dirty_set(cwd):
             paths.add(src)
             i = j2 + 1
     return paths
+
+
+def _split_tracked_and_artifacts(cwd, paths):
+    """Split dirty paths into tracked contamination and new artifacts"""
+    if not paths:
+        return set(), set()
+    proc = subprocess.run(
+        ["git", "ls-files", "-z", "--", *sorted(paths)],
+        cwd=cwd, capture_output=True, check=True, text=False,
+    )
+    tracked = {
+        value.decode("utf-8", errors="replace")
+        for value in proc.stdout.split(b"\x00")
+        if value
+    }
+    return tracked, set(paths) - tracked
+
+
+def _capture_artifacts(cwd, paths, *, max_bytes=MAX_ARTIFACT_BYTES):
+    """Capture disposable dirty text files for portable assertions"""
+    root = Path(cwd).resolve()
+    artifacts = []
+    for relative in sorted(paths):
+        candidate = (root / relative).resolve()
+        if root not in candidate.parents or not candidate.is_file():
+            continue
+        try:
+            if candidate.stat().st_size > max_bytes:
+                continue
+            content = candidate.read_text(errors="replace")
+        except OSError:
+            continue
+        artifacts.append({"path": relative, "content": content})
+    return artifacts
+
+
+def _capture_transcript_artifacts(
+    transcript_path, *, agent, cwd, max_bytes=MAX_ARTIFACT_BYTES,
+):
+    """Capture explicit writes and temp files named by file-change events"""
+    parsed = parse_transcript(transcript_path, agent=agent)
+    artifacts = {
+        artifact.path: {
+            "path": artifact.path,
+            "content": artifact.content,
+        }
+        for artifact in parsed.artifacts
+    }
+    referenced_paths = set()
+    for action in parsed.actions:
+        if action.name != "file_change":
+            continue
+        action_path = action.input.get("path")
+        if isinstance(action_path, str) and action_path:
+            referenced_paths.add(action_path)
+        for change in action.input.get("changes", ()) or ():
+            if not isinstance(change, dict):
+                continue
+            change_path = change.get("path")
+            if isinstance(change_path, str) and change_path:
+                referenced_paths.add(change_path)
+
+    worktree_root = Path(cwd).resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    for reported_path in sorted(referenced_paths):
+        candidate = Path(reported_path)
+        if not candidate.is_absolute():
+            candidate = worktree_root / candidate
+        try:
+            candidate = candidate.resolve()
+            allowed = (
+                candidate == worktree_root
+                or worktree_root in candidate.parents
+                or candidate == temp_root
+                or temp_root in candidate.parents
+            )
+            if not allowed or not candidate.is_file():
+                continue
+            if candidate.stat().st_size > max_bytes:
+                continue
+            content = candidate.read_text(errors="replace")
+        except OSError:
+            continue
+        artifacts[reported_path] = {
+            "path": reported_path,
+            "content": content,
+        }
+    return list(artifacts.values())
+
+
+def _merge_artifacts(*groups):
+    merged = {}
+    for group in groups:
+        for artifact in group:
+            path = artifact.get("path")
+            content = artifact.get("content")
+            if not isinstance(path, str) or not isinstance(content, str):
+                continue
+            merged[path] = {"path": path, "content": content}
+    return [merged[path] for path in sorted(merged)]
 
 
 def _git_repo_root(cwd):
@@ -555,7 +632,7 @@ WORKTREE_ROOT = "/tmp/eval-worktrees"
 
 # Per-worktree-path snapshot of the operator repo's branch set at
 # create time. Branches are repo-scoped (shared across worktrees), so
-# eval-Sonnet's `git checkout -b feat/phantom` leaks into the operator
+# An eval agent's `git checkout -b feat/phantom` leaks into the operator
 # repo's `git branch --list` even though the worktree itself is
 # isolated. _destroy_worker_worktree consults this map to decide what
 # branches to delete during teardown.
@@ -565,7 +642,7 @@ _WORKTREE_BRANCHES_AT_CREATE = {}
 def _lock_worktree_readonly(wt_path):
     """Recursively chmod the worktree to read-only (dirs r-x, files r--).
 
-    Why: the eval-Sonnet sometimes treats a customer-support prompt as
+    Why: an eval agent sometimes treats a customer-support prompt as
     a development directive against the harness's own source -- e.g.
     "Increase SCAPI timeout to 15 seconds" prompted Edit calls on
     skills/_shared/scrape/fetch-url.js to add an AbortSignal. The
@@ -669,7 +746,7 @@ def _destroy_worker_worktree(wt_path):
     list of failure descriptions (empty on success).
 
     Why phantom-branch cleanup belongs here: branches in git are
-    repo-scoped, not worktree-scoped. Eval-Sonnet's `git checkout -b
+    repo-scoped, not worktree-scoped. An eval agent's `git checkout -b
     feat/phantom` inside the worktree creates a refs/heads/feat/phantom
     in the operator repo's branch list. `git worktree remove` does
     not delete those refs (worktree HEADs that point to a branch
@@ -759,8 +836,9 @@ def _destroy_worker_worktree(wt_path):
 
 
 def _spawn_and_bail(query, transcript_path, timeout, cwd,
-                    skill_path=None, also_install=()):
-    """Run claude -p with the canonical command line in an ephemeral
+                    skill_path=None, also_install=(), agent=DEFAULT_AGENT,
+                    allow_worktree_writes=False):
+    """Run the selected agent in an ephemeral
     per-spawn git worktree. Returns the bail dict from
     run_with_retry_aware_bail with three extra keys:
       - worktree_contaminated (bool): the spawn left the per-spawn
@@ -776,7 +854,7 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd,
 
     Per-spawn worktree isolation: each spawn runs in its own
     `git worktree add` checkout at HEAD, located outside the operator
-    repo at /tmp/eval-worktrees/<pid>-<spawn>/. Eval-Sonnet can
+    repo at /tmp/eval-worktrees/<pid>-<spawn>/. The eval agent can
     `git checkout -b`, `git submodule add`, edit tracked files, clone
     upstreams -- whatever -- and none of it reaches the operator's
     repo because that's not the cwd it sees. Teardown is unconditional
@@ -784,18 +862,13 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd,
 
     Pivoted to this design after iteration-eval-harness-worktree-
     isolation-v2's detection-and-restore approach proved
-    self-destructive: when eval-Sonnet ran `git checkout -b` on the
+    self-destructive: when an eval agent ran `git checkout -b` on the
     operator's repo, our `_restore_branch_state` issued
     `git checkout --force` which discarded all uncommitted edits --
     including the harness source files being edited mid-development.
     """
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     profile = os.environ.get("STREAM_EVAL_PROFILE", "isolated")
-    if profile not in PROFILE_FLAGS:
-        raise ValueError(
-            f"unknown STREAM_EVAL_PROFILE {profile!r}; "
-            f"must be one of {sorted(PROFILE_FLAGS)}"
-        )
+    adapter = get_agent_adapter(agent)
     if profile == "isolated":
         if skill_path is None:
             raise ValueError(
@@ -803,31 +876,19 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd,
                 "to the harness CLI"
             )
         home_ctx = prepare_isolated_home(
-            skill_path=skill_path, also_install=also_install,
+            skill_path=skill_path,
+            also_install=also_install,
+            agent=agent,
         )
     else:
         home_ctx = contextlib.nullcontext((None, None))
 
-    cmd = [
-        "claude",
-        "-p", query,
-        "--output-format", "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--model", EVAL_MODEL,
-        # Optional reasoning-effort; omitted when STREAM_EVAL_EFFORT is unset so the
-        # model's own default effort applies (keeps existing runs byte-for-byte).
-        *(["--effort", EVAL_EFFORT] if EVAL_EFFORT else []),
-        # bypassPermissions: without this, Skill invocations under `claude -p`
-        # return is_error: true content="Execute skill: <name>" (the
-        # permission-prompt body, fired in non-interactive mode). The model
-        # sometimes recovers via a Read fallback on SKILL.md but
-        # not deterministically – iteration-harness-skill-load-determinism
-        # observed 5/5 passes when SKILL.md loaded vs. freelance from
-        # training data when it didn't. Applies globally to both profiles.
-        "--permission-mode", "bypassPermissions",
-        *PROFILE_FLAGS[profile],
-    ]
+    cmd = adapter.build_command(
+        query=query,
+        model=EVAL_MODEL,
+        effort=EVAL_EFFORT,
+        profile=profile,
+    )
 
     repo_root = _git_repo_root(cwd)
     # Spawn id encodes worker identity: pid is in the worktree path,
@@ -840,25 +901,51 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd,
     # misreads a customer prompt as a development task. Contamination
     # detection still runs after the spawn so any successful writes
     # (e.g. via Bash chmod-then-write) still surface as flagged paths.
-    _lock_worktree_readonly(wt_path)
+    if not allow_worktree_writes:
+        _lock_worktree_readonly(wt_path)
     try:
         with home_ctx as (isolated_home, _isolated_name):
-            if isolated_home is not None:
-                env["HOME"] = isolated_home
-            bail = run_with_retry_aware_bail(
-                cmd, transcript_path, env, wt_path, timeout,
-            )
+            with adapter.prepare_environment(
+                os.environ,
+                profile=profile,
+                isolated_home=isolated_home,
+            ) as env:
+                bail = run_with_retry_aware_bail(
+                    cmd,
+                    transcript_path,
+                    env,
+                    wt_path,
+                    timeout,
+                    classify_event=adapter.classify_event,
+                )
         # Detection: did the spawn leave the worktree dirty? The
         # operator repo is untouchable by construction; this flag
         # is purely for marking pass verdicts as unaudited.
         wt_dirty = _git_dirty_set(wt_path)
-        if wt_dirty:
+        tracked_dirty, _ = _split_tracked_and_artifacts(
+            wt_path, wt_dirty,
+        )
+        transcript_artifacts = _capture_transcript_artifacts(
+            transcript_path,
+            agent=agent,
+            cwd=wt_path,
+        )
+        bail["artifacts"] = _merge_artifacts(
+            transcript_artifacts,
+            _capture_artifacts(wt_path, wt_dirty),
+        )
+        bail["artifact_paths"] = sorted({
+            *wt_dirty,
+            *(item["path"] for item in transcript_artifacts),
+        })
+        if tracked_dirty:
             bail["worktree_contaminated"] = True
-            bail["worktree_changed_paths"] = sorted(wt_dirty)
+            bail["worktree_changed_paths"] = sorted(tracked_dirty)
         else:
             bail["worktree_contaminated"] = False
             bail["worktree_changed_paths"] = []
         bail["worktree_restore_failures"] = []
+        bail["agent"] = agent
     finally:
         teardown_failures = _destroy_worker_worktree(wt_path)
         if teardown_failures:
@@ -874,8 +961,9 @@ def _spawn_and_bail(query, transcript_path, timeout, cwd,
 
 def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
                   timeout, cwd, get_query, score_run,
-                  skill_path=None, also_install=()):
-    """Worker entry point: spawn one claude -p, score, return per-run dict.
+                  skill_path=None, also_install=(), agent=DEFAULT_AGENT,
+                  allow_worktree_writes=False):
+    """Worker entry point: spawn one agent, score, return per-run dict.
 
     transcript_dir=None -> tempfile that gets unlinked. Otherwise the
     transcript is written to <transcript_dir>/<fixture_id>-<run_idx>.jsonl
@@ -885,11 +973,11 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
     access via r["fixture_id"], etc.):
       - fixture_id (str): id assigned by assign_fixture_ids
       - run_idx (int): 1-based run index within the fixture
-      - elapsed_seconds (float): wall-clock seconds spent in claude -p
+      - elapsed_seconds (float): wall-clock seconds spent in the agent CLI
       - total_retries (int): retry count from run_with_retry_aware_bail
       - timed_out (bool): True if retry budget or wall clock tripped
       - timeout_reason (str | None): "retry_budget_exhausted",
-        "wall_clock", or None
+        "wall_clock_in_retry", "wall_clock", or None
       - transcript_path (str | None): persisted path when transcript_dir
         was supplied, else None (tempfile already unlinked)
       - pass_ (bool): score_run's pass verdict; forced False on timeout
@@ -899,18 +987,18 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
         assertion_results survive partial runs; empty only if score_run
         raised.
       - worktree_contaminated (bool): True if the spawn left the
-        worktree dirtier than it found it (eval-Sonnet edited source).
+        worktree dirtier than it found it (the eval agent edited source).
         A contaminated run's pass_ is unaudited regardless of value --
         per-run scoring runs on the contaminated state, not on HEAD.
       - worktree_changed_paths (list[str]): repo-relative paths that
-        became dirty during the spawn (post-baseline-subtraction).
-      - worktree_restore_failures (list[str]): paths auto-restore
-        couldn't revert. Operator must clean by hand if non-empty.
+        became dirty during the spawn.
+      - worktree_restore_failures (list[str]): teardown operations that
+        failed while destroying the disposable worktree.
     """
     query = get_query(fixture)
     if transcript_dir is None:
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
+            mode="w", suffix=".jsonl", delete=False
         ) as f:
             transcript_path = f.name
         retain = False
@@ -924,7 +1012,10 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
     t0 = time.time()
     try:
         bail = _spawn_and_bail(query, transcript_path, timeout, cwd,
-                              skill_path=skill_path, also_install=also_install)
+                              skill_path=skill_path,
+                              also_install=also_install,
+                              agent=agent,
+                              allow_worktree_writes=allow_worktree_writes)
         elapsed = round(time.time() - t0, 2)
         timed_out = (bail["retry_budget_exhausted"]
                      or bail["wall_timed_out"]
@@ -963,6 +1054,8 @@ def _run_one_task(fixture, run_idx, fixture_id, transcript_dir,
             "transcript_path": transcript_path if retain else None,
             "pass_": pass_,
             "kind_extra": kind_extra,
+            "agent": agent,
+            "artifact_paths": bail.get("artifact_paths", []),
             "worktree_contaminated": bail.get("worktree_contaminated", False),
             "worktree_changed_paths": bail.get("worktree_changed_paths", []),
             "worktree_restore_failures": bail.get(
@@ -982,22 +1075,26 @@ def _pool_target(args_tuple):
     Dispatcher-based dispatch path; kept so any external callers that
     reference it by name do not break on import."""
     (fixture, run_idx, fixture_id, transcript_dir, timeout, cwd,
-     get_query, score_run, skill_path, also_install) = args_tuple
+     get_query, score_run, skill_path, also_install) = args_tuple[:10]
+    agent = args_tuple[10] if len(args_tuple) > 10 else DEFAULT_AGENT
+    allow_worktree_writes = args_tuple[11] if len(args_tuple) > 11 else False
     return _run_one_task(fixture, run_idx, fixture_id,
                           transcript_dir, timeout, cwd,
                           get_query, score_run,
-                          skill_path=skill_path, also_install=also_install)
+                          skill_path=skill_path, also_install=also_install,
+                          agent=agent,
+                          allow_worktree_writes=allow_worktree_writes)
 
 
 class _SubprocessWorker:
     """Adapter from _run_one_task's call signature to the WorkerSlot
     contract Dispatcher expects (start, is_done, join, result).
 
-    Runs _run_one_task in a daemon thread; the actual `claude -p`
+    Runs _run_one_task in a daemon thread; the actual agent CLI
     subprocess is spawned inside that thread (so the thread blocks on
     Popen.wait, not on a process-pool boundary). One thread per
     in-flight subprocess; thread overhead is negligible compared to
-    the multi-second `claude -p` runtime.
+    the multi-second agent CLI runtime.
     """
     __slots__ = ("_task", "_kwargs", "_thread", "_done", "result")
 
@@ -1028,6 +1125,8 @@ class _SubprocessWorker:
                 "transcript_path": None,
                 "pass_": False,
                 "kind_extra": {"error": repr(exc)},
+                "agent": self._kwargs.get("agent", DEFAULT_AGENT),
+                "artifact_paths": [],
                 "worktree_contaminated": False,
                 "worktree_changed_paths": [],
                 "worktree_restore_failures": [],
@@ -1108,6 +1207,7 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
              transcript_dir, summary_label,
              skill_name, eval_path,
              skill_path=None, also_install=(),
+             agent=DEFAULT_AGENT, allow_worktree_writes=False,
              executor_class=None):
     """Drive the eval. Returns (results_dict, exit_code).
 
@@ -1133,19 +1233,19 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
       - get_fixture_id: callable (fixture) -> str | None. Non-empty
         string is the explicit id; anything else triggers fallback to
         `qN`. Passed to assign_fixture_ids as `get_name`.
-      - get_query: callable (fixture) -> str. The query sent to
-        claude -p, also used to format the human-readable tail of each
+      - get_query: callable (fixture) -> str. The query sent to the
+        selected agent, also used to format the human-readable tail of each
         progress line.
       - score_run: callable (fixture, transcript_path, bail) ->
-        (pass: bool, kind_extra: dict). Runs only on non-timed-out
-        completions (timed-out runs auto-fail with empty kind_extra).
-        The bail dict comes from run_with_retry_aware_bail. kind_extra
-        is the harness's free-form per-run payload; the runner extracts
-        `first_tool`, `first_skill`, and `assertion_results` for the
-        canonical line if present.
+        (pass: bool, kind_extra: dict). Runs on completed and timed-out
+        transcripts so partial diagnostics survive; timed-out verdicts
+        are forced to fail. The bail dict comes from
+        run_with_retry_aware_bail. kind_extra is the harness's free-form
+        per-run payload; the runner extracts `first_tool`, `first_skill`,
+        and `assertion_results` for the canonical line if present.
       - runs_per_fixture: int. Total tasks dispatched =
         len(fixtures) * runs_per_fixture.
-      - cwd: str. Passed to claude -p subprocesses as their working
+      - cwd: str. Passed to agent subprocesses as their working
         directory.
       - transcript_dir: Path | None. None means each run's transcript
         goes to a tempfile that's unlinked after scoring (trigger-eval
@@ -1181,19 +1281,14 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
         # default buffering rather than abort the eval.
         pass
 
-    # Tee stderr to a known location under ~/.claude/projects/ so the
-    # dashboard's file walk discovers this run without the operator
-    # having to redirect stderr by hand. Claude Code's Bash tool used
-    # to put background-process stderr under ~/.claude/projects/...
-    # /<id>.output, which the legacy monitor scanned; that path moved
-    # to /tmp/claude-501/ in recent versions, so the dashboard now
-    # sees nothing from real evals unless we write our own copy.
+    # Tee stderr to an agent-neutral state directory so the dashboard
+    # discovers this run without shell-specific output capture
     _install_stderr_tee()
     # Print the startup banner BEFORE assigning ids -- if assignment
     # raises, the harness still gets a banner-less abort, which is fine.
     print(
         format_startup_banner(
-            kind=kind, skill=skill_name, eval_path=eval_path,
+            kind=kind, agent=agent, skill=skill_name, eval_path=eval_path,
             runs=runs_per_fixture, workers=workers,
             total_fixtures=len(fixtures),
         ),
@@ -1220,7 +1315,7 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
                 fixture, run_idx, fixture_id,
                 str(transcript_dir) if transcript_dir else None,
                 timeout, cwd, get_query, score_run,
-                skill_path, also_install,
+                skill_path, also_install, agent, allow_worktree_writes,
             ))
 
     results_by_id = {fid: {"fixture": fx, "runs": []}
@@ -1229,8 +1324,8 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
     # _run_one_task(**kwargs) without unpacking a positional tuple.
     task_kwargs_list = []
     for (fx, run_idx, fixture_id, td, to, task_cwd,
-         gq, sr, sp, ai) in tasks:
-        task_kwargs_list.append({
+         gq, sr, sp, ai, task_agent, allow_writes) in tasks:
+        task_kwargs = {
             "fixture": fx,
             "run_idx": run_idx,
             "fixture_id": fixture_id,
@@ -1241,7 +1336,12 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
             "score_run": sr,
             "skill_path": sp,
             "also_install": ai,
-        })
+        }
+        if task_agent != DEFAULT_AGENT:
+            task_kwargs["agent"] = task_agent
+        if allow_writes:
+            task_kwargs["allow_worktree_writes"] = True
+        task_kwargs_list.append(task_kwargs)
 
     total = len(task_kwargs_list)
     t0 = time.time()
@@ -1458,6 +1558,8 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
 
     envelope = {
         "kind": kind,
+        "agent": agent,
+        "model": EVAL_MODEL or get_agent_adapter(agent).default_model or "default",
         "eval_set": eval_path,
         "runs_per_fixture": runs_per_fixture,
         "total_fixtures": len(fixtures),
@@ -1486,7 +1588,12 @@ def run_eval(*, kind, fixtures, get_fixture_id, get_query, score_run,
     # since the API itself wasn't poisoned).
     verdict = "aborted" if (aborted_on_timeout or operator_stopped) else "completed"
     print(
-        format_finish_banner(kind=kind, skill=skill_name, verdict=verdict),
+        format_finish_banner(
+            kind=kind,
+            agent=agent,
+            skill=skill_name,
+            verdict=verdict,
+        ),
         file=sys.stderr,
     )
 

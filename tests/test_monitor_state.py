@@ -33,6 +33,7 @@ def test_build_state_from_one_output_file(sample_output_file):
     row = rows[0]
     assert row.skill == "dsc-scrape"
     assert row.kind == "trigger"
+    assert row.agent == "claude"
     assert row.total_fixtures == 2
     assert row.runs == 3
     assert row.harness_pid == 4242
@@ -41,6 +42,19 @@ def test_build_state_from_one_output_file(sample_output_file):
     fail_count = sum(1 for c in row.cells if c.pass_ is False)
     assert pass_count == 1
     assert fail_count == 1
+
+
+def test_build_state_records_selected_agent(tmp_path):
+    path = tmp_path / "opencode.output"
+    path.write_text(
+        "=== eval starting: kind=trigger agent=opencode skill=demo "
+        "eval=evals/demo/trigger-eval.json runs=1 workers=1 "
+        "total_fixtures=1 pid=5252 ===\n"
+    )
+
+    state = build_state([path], is_pid_alive=lambda pid: pid == 5252)
+
+    assert state.rows[0].agent == "opencode"
 
 
 def test_build_state_cells_carry_retries(sample_output_file):
@@ -456,4 +470,3 @@ def test_build_state_legacy_banner_without_started_at(tmp_path):
     assert len(state.rows) == 1
     assert state.rows[0].started_at is None
     assert state.rows[0].finished_at is None
-

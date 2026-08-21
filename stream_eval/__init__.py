@@ -1,2 +1,2 @@
-"""stream-eval: deterministic assertion harness for claude -p transcripts."""
-__version__ = "0.1.0"
+"""stream-eval: deterministic assertion harness for agent transcripts"""
+__version__ = "0.2.0"

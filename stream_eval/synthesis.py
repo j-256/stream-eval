@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Synthesis-eval harness for DSC skills.
+"""Synthesis-eval harness for agent skills
 
-Drives `claude -p --model sonnet` against fixtures declared in
-`evals/<skill>/synthesis-eval.json`, parses the stream-json transcripts,
-and asserts against typed assertion records.
+Drives the selected agent adapter against fixture queries, normalizes its
+JSONL transcript, and evaluates typed assertions.
 
 """
 import argparse
@@ -12,12 +11,21 @@ import os
 import re
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
+from stream_eval.agents import (
+    DEFAULT_AGENT,
+    SUPPORTED_AGENTS,
+    SUPPORTED_PROFILES,
+)
 from stream_eval.control import install_signal_handlers, serve_socket
 from stream_eval.runner import run_eval
+from stream_eval.transcript import (
+    ParsedTranscript,
+    ToolUse,
+    parse_transcript as parse_agent_transcript,
+)
 
 
 KIND_REQUIRED_FIELDS = {
@@ -25,25 +33,14 @@ KIND_REQUIRED_FIELDS = {
     "final_text_excludes": ["pattern"],
     "tool_input_matches": ["tool", "field", "pattern"],
     "tool_sequence_includes": ["pattern"],
+    "action_input_matches": ["action", "field", "pattern"],
+    "action_sequence_includes": ["pattern"],
+    "artifact_content_matches": ["pattern"],
 }
 
 
 class FixtureSchemaError(Exception):
     pass
-
-
-@dataclass
-class ToolUse:
-    name: str
-    input: dict
-
-
-@dataclass
-class ParsedTranscript:
-    tool_uses: list = field(default_factory=list)
-    final_text: Optional[str] = None
-    transcript_path: Optional[Path] = None
-
 
 @dataclass
 class AssertionResult:
@@ -143,6 +140,54 @@ def evaluate_assertion(assertion, parsed):
                                f"sequence {sequence!r} did not match {pattern!r}",
                                because)
 
+    if kind == "action_input_matches":
+        action_name = assertion["action"]
+        field_name = assertion["field"]
+        pattern = assertion["pattern"]
+        for action in parsed.actions:
+            if action.name != action_name:
+                continue
+            value = action.input.get(field_name, "")
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value)
+            if re.search(pattern, str(value)):
+                return AssertionResult(
+                    kind, args, True,
+                    f"matched on {action_name}.{field_name}", because,
+                )
+        return AssertionResult(
+            kind, args, False,
+            f"no {action_name} action had {field_name} matching {pattern!r}",
+            because,
+        )
+
+    if kind == "action_sequence_includes":
+        pattern = assertion["pattern"]
+        sequence = "\n".join(action.name for action in parsed.actions)
+        if re.search(pattern, sequence):
+            return AssertionResult(kind, args, True, "sequence matched", because)
+        return AssertionResult(
+            kind, args, False,
+            f"sequence {sequence!r} did not match {pattern!r}", because,
+        )
+
+    if kind == "artifact_content_matches":
+        pattern = assertion["pattern"]
+        path_pattern = assertion.get("path")
+        for artifact in parsed.artifacts:
+            if path_pattern and not re.search(path_pattern, artifact.path):
+                continue
+            if re.search(pattern, artifact.content):
+                return AssertionResult(
+                    kind, args, True,
+                    f"matched artifact {artifact.path}", because,
+                )
+        scope = f" with path matching {path_pattern!r}" if path_pattern else ""
+        return AssertionResult(
+            kind, args, False,
+            f"no artifact{scope} had content matching {pattern!r}", because,
+        )
+
     raise ValueError(f"unknown assertion kind: {kind!r}")
 
 
@@ -153,36 +198,16 @@ def transcript_dir_for(out_path):
     return out_path.parent / "transcripts" / out_path.stem
 
 
-def parse_transcript(path):
-    """Parse a stream-json JSONL transcript.
-
-    Walks `assistant` events for tool_use content blocks (in order) and
-    extracts the final answer string from the single `result` event.
-    Partial `stream_event` chunks are ignored — completed tool calls
-    appear canonically in `assistant` events.
-    """
-    out = ParsedTranscript(transcript_path=Path(path))
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            t = d.get("type")
-            if t == "assistant":
-                for c in d.get("message", {}).get("content", []):
-                    if c.get("type") == "tool_use":
-                        out.tool_uses.append(ToolUse(
-                            name=c.get("name", ""),
-                            input=c.get("input", {}) or {},
-                        ))
-            elif t == "result":
-                r = d.get("result")
-                out.final_text = r if isinstance(r, str) else str(r)
-    return out
+def parse_transcript(
+    path, *, agent=DEFAULT_AGENT, artifacts=(), known_skills=(),
+):
+    """Compatibility wrapper around the portable transcript parser"""
+    return parse_agent_transcript(
+        path,
+        agent=agent,
+        artifacts=artifacts,
+        known_skills=known_skills,
+    )
 
 
 def get_synthesis_query(fixture):
@@ -209,17 +234,21 @@ def score_synthesis_run(fixture, transcript_path, bail):
     surface them on the canonical stderr line; assertion_results +
     expected_skill_pass are downstream consumers (results.json).
     """
-    parsed = parse_transcript(transcript_path)
+    expected_skill = fixture.get("expected_skill")
+    known_skills = (expected_skill,) if expected_skill else ()
+    parsed = parse_transcript(
+        transcript_path,
+        agent=bail.get("agent", DEFAULT_AGENT),
+        artifacts=bail.get("artifacts", ()),
+        known_skills=known_skills,
+    )
 
     first_tool = None
-    first_skill = None
     if parsed.tool_uses:
-        first = parsed.tool_uses[0]
-        first_tool = first.name
-        if first.name == "Skill":
-            first_skill = first.input.get("skill")
+        first_tool = parsed.tool_uses[0].name
 
-    expected_skill = fixture.get("expected_skill")
+    first_action = parsed.first_action.name if parsed.first_action else None
+    first_skill = parsed.first_skill
     expected_skill_pass = (
         expected_skill is None or first_skill == expected_skill
     )
@@ -240,6 +269,7 @@ def score_synthesis_run(fixture, transcript_path, bail):
     )
     return all_pass, {
         "first_tool": first_tool,
+        "first_action": first_action,
         "first_skill": first_skill,
         "expected_skill_pass": expected_skill_pass,
         "assertion_results": assertion_records,
@@ -259,14 +289,25 @@ def main(argv=None):
     ap.add_argument("--timeout", type=int, default=300,
                     help="Per-run wall-clock backstop in seconds "
                          "(default 300). Measures effective model-thinking "
-                         "time only -- retry-backoff windows are excluded.")
+                         "time; adapter-reported retry-backoff windows are "
+                         "excluded.")
     ap.add_argument("--cwd", default=None)
     ap.add_argument(
-        "--profile", choices=["isolated", "restricted", "inherit"],
-        default="isolated",
-        help="Toolbelt profile for the spawned claude -p. 'isolated' "
+        "--agent",
+        choices=SUPPORTED_AGENTS,
+        default=os.environ.get("STREAM_EVAL_AGENT", DEFAULT_AGENT),
+        help=(
+            "Agent CLI backend (default: STREAM_EVAL_AGENT or "
+            f"{DEFAULT_AGENT})"
+        ),
+    )
+    ap.add_argument(
+        "--profile", choices=SUPPORTED_PROFILES,
+        default=os.environ.get("STREAM_EVAL_PROFILE", "isolated"),
+        help="Isolation profile for the spawned agent. 'isolated' "
              "(default) uses a temp HOME with only the skill under test; "
-             "'restricted' uses the user's real HOME but strips MCP/Agent; "
+             "'restricted' uses the user's real HOME but strips MCP and "
+             "subagents; "
              "'inherit' runs with the user's full environment.",
     )
     ap.add_argument("--skill-path", required=False,
@@ -385,6 +426,8 @@ def _run_with_socket(args, skill_name, skill_path, also_install):
         eval_path=args.eval,
         skill_path=skill_path,
         also_install=also_install,
+        agent=args.agent,
+        allow_worktree_writes=True,
     )
 
     results["strict"] = not args.lenient

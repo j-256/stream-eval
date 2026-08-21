@@ -98,12 +98,73 @@ def test_find_claude_workers_for_returns_claude_children():
         workers = list(find_claude_workers_for(100))
     assert len(workers) == 1
     assert workers[0]["pid"] == 201
+    assert workers[0]["agent"] == "claude"
+
+
+def test_find_agent_workers_for_returns_codex_children():
+    from stream_eval.monitor.ps import find_agent_workers_for
+
+    parent = _fake_proc(
+        100, 1, "python3",
+        ["python3", "-m", "stream_eval.cli", "trigger"],
+        1.0,
+    )
+    child_codex = _fake_proc(
+        203, 100, "codex",
+        ["/usr/local/bin/codex", "exec", "--json", "test query"],
+        2.0,
+    )
+    child_git = _fake_proc(
+        204, 100, "git",
+        ["git", "status", "--porcelain"],
+        2.5,
+    )
+    parent.children = mock.MagicMock(return_value=[child_codex, child_git])
+
+    with mock.patch("stream_eval.monitor.ps.psutil.Process",
+                    return_value=parent):
+        workers = list(find_agent_workers_for(100))
+    assert len(workers) == 1
+    assert workers[0]["pid"] == 203
+    assert workers[0]["agent"] == "codex"
+
+
+def test_find_agent_workers_for_returns_opencode_children():
+    from stream_eval.monitor.ps import find_agent_workers_for
+
+    parent = _fake_proc(
+        100, 1, "python3",
+        ["python3", "-m", "stream_eval.cli", "trigger"],
+        1.0,
+    )
+    child_opencode = _fake_proc(
+        205, 100, "opencode",
+        ["/usr/local/bin/opencode", "run", "--format", "json"],
+        2.0,
+    )
+    child_git = _fake_proc(
+        206, 100, "git",
+        ["git", "status", "--porcelain"],
+        2.5,
+    )
+    parent.children = mock.MagicMock(
+        return_value=[child_opencode, child_git]
+    )
+
+    with mock.patch(
+        "stream_eval.monitor.ps.psutil.Process",
+        return_value=parent,
+    ):
+        workers = list(find_agent_workers_for(100))
+    assert len(workers) == 1
+    assert workers[0]["pid"] == 205
+    assert workers[0]["agent"] == "opencode"
 
 
 def test_find_claude_workers_for_rejects_git_subprocess_with_claude_in_path():
     """The runner spawns git for worktree management. A git invocation
     whose --git-dir path happens to contain 'claude' (e.g.
-    /Users/me/claude-code-skills/.git) must NOT be reported as a
+    /Users/me/claude-adapter-fixture/.git) must NOT be reported as a
     claude worker -- only argv[0]'s basename being exactly 'claude'
     counts."""
     from stream_eval.monitor.ps import find_claude_workers_for
@@ -116,7 +177,7 @@ def test_find_claude_workers_for_rejects_git_subprocess_with_claude_in_path():
     fake_git = _fake_proc(
         300, 100, "git",
         ["git",
-         "--git-dir=/Users/me/claude-code-skills/.git",
+         "--git-dir=/Users/me/claude-adapter-fixture/.git",
          "status", "--porcelain"],
         2.0,
     )
@@ -222,16 +283,16 @@ def test_transcript_stats_handles_missing_file():
     assert stats["last_error"] is None
 
 
-def test_find_claude_workers_for_falls_back_to_sidecar_when_no_real_children(tmp_path, monkeypatch):
+def test_find_agent_workers_for_falls_back_to_sidecar_when_no_real_children(tmp_path, monkeypatch):
     """The fake submodule writes a sidecar JSON when scenarios declare
-    in-flight workers. find_claude_workers_for falls back to that
+    in-flight workers. find_agent_workers_for falls back to that
     sidecar when psutil yields no real children, so fake harnesses
     can render the in-flight cells without spinning up subprocesses."""
-    from stream_eval.monitor.ps import find_claude_workers_for
+    from stream_eval.monitor.ps import find_agent_workers_for
 
-    fake_projects = tmp_path / ".claude" / "projects" / "stream-eval-fake"
-    fake_projects.mkdir(parents=True)
-    sidecar = fake_projects / "x.workers.json"
+    fake_state = tmp_path / ".local" / "state" / "stream-eval" / "fake"
+    fake_state.mkdir(parents=True)
+    sidecar = fake_state / "x.workers.json"
     sidecar.write_text('{"harness_pid": 90001, "workers": ['
                         '{"pid": 9000101, "started_at": 1.0, '
                         '"cmdline": ["claude"], '
@@ -247,7 +308,7 @@ def test_find_claude_workers_for_falls_back_to_sidecar_when_no_real_children(tmp
     parent.children = mock.MagicMock(return_value=[])
     with mock.patch("stream_eval.monitor.ps.psutil.Process",
                     return_value=parent):
-        workers = list(find_claude_workers_for(90001))
+        workers = list(find_agent_workers_for(90001))
     assert len(workers) == 1
     assert workers[0]["fixture_id"] == "q0"
     assert workers[0]["retries"] == 2

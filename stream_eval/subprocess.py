@@ -1,12 +1,8 @@
-"""Retry-aware subprocess wrapper for the eval harnesses.
+"""Retry-aware subprocess wrapper for the eval harnesses
 
-The Claude CLI emits stream-json events of the shape
-
-  {"type":"system","subtype":"api_retry","attempt":N,"max_retries":M,
-   "error":"rate_limit"|"server_error",...}
-
-while waiting on the upstream API. This module wraps `subprocess.Popen`
-to provide three independent bail signals:
+Agent adapters classify their native JSONL events as output, retry, or
+neither. This module wraps `subprocess.Popen` to provide three independent
+bail signals:
 
   - api_retry budget exhausted (`attempt == max_retries` on the most
     recent retry event). The principled "upstream poisoned" signal.
@@ -35,8 +31,10 @@ ABSOLUTE_BACKSTOP_MULTIPLIER = 4
 
 
 def classify_line(d):
-    """Classify a parsed stream-json event for the retry-window state
-    machine.
+    """Classify a legacy Claude stream-json event
+
+    Agent adapters supply their own classifier. This function remains the
+    default for backward compatibility with direct callers.
 
     Returns:
       ('retry', {attempt, max_retries}) for api_retry events.
@@ -130,7 +128,8 @@ class RetryClock:
         return self._now_fn() - self._t0
 
 
-def run_with_retry_aware_bail(cmd, stdout_path, env, cwd, timeout):
+def run_with_retry_aware_bail(cmd, stdout_path, env, cwd, timeout,
+                              classify_event=None):
     """Spawn `cmd`, redirect stdout to `stdout_path`, and stream the
     JSONL there live to detect retry-budget exhaustion.
 
@@ -164,6 +163,9 @@ def run_with_retry_aware_bail(cmd, stdout_path, env, cwd, timeout):
         "exit_code": int | None, # process exit code, or None if killed
       }
     """
+    if classify_event is None:
+        classify_event = classify_line
+
     retry_budget_exhausted = False
     wall_timed_out = False
     wall_timed_out_in_retry = False
@@ -191,7 +193,7 @@ def run_with_retry_aware_bail(cmd, stdout_path, env, cwd, timeout):
                         d = json.loads(raw)
                     except Exception:
                         continue
-                    kind, info = classify_line(d)
+                    kind, info = classify_event(d)
                     clock.on_event(kind, info)
                     if kind == "retry":
                         total_retries += 1

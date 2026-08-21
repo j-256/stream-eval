@@ -32,13 +32,14 @@ from flask import (
 
 from stream_eval.monitor.ps import (
     detect_session,
-    find_claude_workers_for,
+    find_agent_workers_for,
     find_output_files,
 )
 from stream_eval.monitor.socket_client import (
     HarnessSocketClient, SocketClientError,
 )
 from stream_eval.monitor.state import build_state
+from stream_eval.paths import output_dirs, state_dir
 
 
 def create_app(session=None):
@@ -53,7 +54,7 @@ def create_app(session=None):
         state = build_state(find_output_files())
         for row in state.rows:
             row.target_workers, row.dispatcher_state = _row_socket_snapshot(row)
-            row.workers_for_row = _claude_workers_for_row(row)
+            row.workers_for_row = _agent_workers_for_row(row)
             row.recent = _recent_for_row(row)
             row.in_flight_count = len(row.workers_for_row)
             row.in_flight_retries = sum(
@@ -141,8 +142,14 @@ def create_app(session=None):
         platforms fall back to os.unlink. Path-traversal guarded:
         only paths under the canonical .output dir are removable.
         """
-        log_dir = Path.home() / ".claude" / "projects" / "stream-eval"
-        target = log_dir / f"{pid}.output"
+        candidates = []
+        for base in output_dirs():
+            candidates.append(base / f"{pid}.output")
+            candidates.append(base / "stream-eval" / f"{pid}.output")
+        target = next((path for path in candidates if path.exists()), None)
+        if target is None:
+            target = state_dir() / f"{pid}.output"
+        log_dir = target.parent
         # Path-traversal guard: resolve and verify the target stays
         # inside log_dir. Pid is already constrained by the int route
         # converter, but the parent dir could theoretically be
@@ -254,15 +261,15 @@ def _row_socket_snapshot(row):
     return (workers, state)
 
 
-def _claude_workers_for_row(row):
+def _agent_workers_for_row(row):
     """Return [{pid, started_at_human, cmdline}, ...] for the live
-    `claude -p` children of this row's harness pid. Empty list for
+    agent CLI children of this row's harness pid. Empty list for
     completed/aborted/unknown rows or when the harness has no children
     at this poll instant."""
     if row.status != "active" or row.harness_pid is None:
         return []
     out = []
-    for w in find_claude_workers_for(row.harness_pid):
+    for w in find_agent_workers_for(row.harness_pid):
         w["started_at_human"] = _humanize(time.time() - w["started_at"])
         out.append(w)
     return out

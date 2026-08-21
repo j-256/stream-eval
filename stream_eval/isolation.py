@@ -1,13 +1,12 @@
-"""Hermetic skill isolation for stream-eval.
+"""Hermetic skill isolation for stream-eval
 
-Each `claude -p` spawn runs against a temp HOME containing only the skill
-under test (and any explicit siblings via --also-install), so the user's
-real ~/.claude/skills/ is invisible and untouched.
+Each agent spawn runs against a temp HOME containing only the skill under
+test and any explicit siblings supplied through --also-install.
 
 Public surface:
 - parse_skill_md_name(skill_path): read the canonical name from
   <skill_path>/SKILL.md frontmatter.
-- prepare_isolated_home(skill_path, also_install): context manager that
+- prepare_isolated_home(agent, skill_path, also_install): context manager that
   yields (home_dir, skill_name) and cleans up the temp HOME on exit
   (success or exception).
 """
@@ -19,6 +18,8 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
+
+from stream_eval.agents import DEFAULT_AGENT, SUPPORTED_AGENTS
 
 
 # Isolated spawns get a throwaway HOME (rmtree'd per run) and the DSC scrape
@@ -86,24 +87,22 @@ def parse_skill_md_name(skill_path):
     )
 
 
-# Minimal settings.json stub for the temp HOME. Empty mcpServers and no
-# permission allowlist keep the spawn vanilla; the model is set per-spawn
-# via the `--model` flag and doesn't need a default here.
+# Minimal Claude settings stub for the temp HOME
 _SETTINGS_STUB = {
     "mcpServers": {},
 }
 
 
 @contextlib.contextmanager
-def prepare_isolated_home(*, skill_path, also_install=()):
+def prepare_isolated_home(*, skill_path, also_install=(), agent=DEFAULT_AGENT):
     """Context manager: build a temp HOME containing only the skill at
     `skill_path` (and any siblings in `also_install`), yield (home_dir,
     skill_name), and clean up on exit (success or exception).
 
-    The directory layout:
-        <home>/.claude/skills/<skill_name>/  -> symlink to skill_path
-        <home>/.claude/skills/<other>/       -> one per also_install entry
-        <home>/.claude/settings.json         -> minimal stub
+    Claude installs under <home>/.claude/skills and receives a minimal
+    settings.json. Codex installs under <home>/.agents/skills. OpenCode
+    installs under <home>/.opencode/skills. All layouts use symlinks to the
+    supplied skill directories.
 
     `home_dir` is a string suitable for assignment to a child process's
     HOME env var. `skill_name` is read from <skill_path>/SKILL.md.
@@ -111,6 +110,9 @@ def prepare_isolated_home(*, skill_path, also_install=()):
     Raises SkillMetadataError if the skill_path doesn't have a parseable
     SKILL.md.
     """
+    if agent not in SUPPORTED_AGENTS:
+        raise ValueError(f"unsupported isolation agent {agent!r}")
+
     skill_path = Path(skill_path).resolve()
     skill_name = parse_skill_md_name(skill_path)
 
@@ -130,13 +132,20 @@ def prepare_isolated_home(*, skill_path, also_install=()):
 
     tmp = tempfile.mkdtemp(prefix=f"stream-eval-{os.getpid()}-")
     try:
-        skills_dir = Path(tmp) / ".claude" / "skills"
+        agent_dirs = {
+            "claude": ".claude",
+            "codex": ".agents",
+            "opencode": ".opencode",
+        }
+        agent_dir = agent_dirs[agent]
+        skills_dir = Path(tmp) / agent_dir / "skills"
         skills_dir.mkdir(parents=True)
         os.symlink(skill_path, skills_dir / skill_name)
         for sib_path, sib_name in sibling_paths:
             os.symlink(sib_path, skills_dir / sib_name)
-        settings = Path(tmp) / ".claude" / "settings.json"
-        settings.write_text(json.dumps(_SETTINGS_STUB, indent=2))
+        if agent == "claude":
+            settings = Path(tmp) / ".claude" / "settings.json"
+            settings.write_text(json.dumps(_SETTINGS_STUB, indent=2))
         # Share one persistent DSC scrape cache across all isolated spawns
         # (ISOLATED_CACHE_DIR). The symlink lives inside the throwaway HOME, so
         # the rmtree below only unlinks it -- the shared cache and its TTL survive

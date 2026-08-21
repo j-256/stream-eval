@@ -1,14 +1,8 @@
-"""Interactive driver: `python3 -m stream_eval.fake <scenarios>`.
+"""Interactive driver: `python3 -m stream_eval.fake <scenarios>`
 
-Synthesizes one or more scenarios into a directory under
-~/.claude/projects/stream-eval-fake-<id>/, prints the path, and
-blocks on Ctrl-C so the dashboard can render against it. The
-directory is removed at exit.
-
-The dashboard discovers .output files by walking ~/.claude/projects
-with Path.rglob, which on Python 3.13+ does NOT follow symlinks --
-so we have to write directly into a real directory inside that tree.
-A symlink to a tempdir would be invisible to the dashboard.
+Synthesizes one or more scenarios in the stream-eval state directory,
+prints the path, and blocks on Ctrl-C so the dashboard can render against
+it. The directory is removed at exit.
 
 Usage:
     python3 -m stream_eval.fake concurrent
@@ -26,6 +20,7 @@ import uuid
 from pathlib import Path
 
 from stream_eval.fake import SCENARIOS, make_fake_state
+from stream_eval.paths import state_dir
 
 
 def main(argv=None):
@@ -37,7 +32,7 @@ def main(argv=None):
     ap.add_argument(
         "--base-dir",
         help="write .output files here instead of "
-             "~/.claude/projects/stream-eval-fake-<id>/",
+             "the stream-eval state directory",
     )
     args = ap.parse_args(argv)
 
@@ -64,16 +59,12 @@ def main(argv=None):
 
     base_dir = args.base_dir
     if base_dir is None:
-        # Write directly into ~/.claude/projects/ rather than into a
-        # tempdir + symlink. Path.rglob in Python 3.13+ does NOT follow
-        # symlinks by default (recurse_symlinks=False), so the
-        # dashboard's _output_paths walk would never see fake files
-        # under a symlinked dir. Putting the fake dir inside the
-        # projects tree directly is the only way to be visible.
-        projects = Path.home() / ".claude" / "projects"
-        projects.mkdir(parents=True, exist_ok=True)
-        _cleanup_orphaned_fake_dirs(projects)
-        base_dir = str(projects / f"stream-eval-fake-{uuid.uuid4().hex[:8]}")
+        state_root = state_dir()
+        state_root.mkdir(parents=True, exist_ok=True)
+        _cleanup_orphaned_fake_dirs(state_root)
+        base_dir = str(
+            state_root / f"stream-eval-fake-{uuid.uuid4().hex[:8]}"
+        )
 
     state = make_fake_state(names, base_dir=base_dir)
     print(f"scenarios: {', '.join(names)}")
@@ -106,14 +97,14 @@ def main(argv=None):
     return 0
 
 
-def _cleanup_orphaned_fake_dirs(projects):
+def _cleanup_orphaned_fake_dirs(state_root):
     """Remove leftover stream-eval-fake-<id>/ directories from prior
     sessions that didn't tear down cleanly (kill -9, OS reboot,
     etc.). Skips dirs that contain fake harnesses with active socket
     files in /tmp -- those might still be in use by a running session.
     """
     import shutil
-    for child in projects.glob("stream-eval-fake-*"):
+    for child in state_root.glob("stream-eval-fake-*"):
         if not child.is_dir():
             continue
         # Read each *.output file's startup banner pid; if any of

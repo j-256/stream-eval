@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 import stream_eval.synthesis as synthesis_eval
+from stream_eval.transcript import Artifact
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "mcg-walk.jsonl"
 
@@ -109,6 +110,44 @@ class TestEvaluateAssertion(unittest.TestCase):
              "because": "test – no WebFetch"}
         result = synthesis_eval.evaluate_assertion(a, self.parsed)
         self.assertFalse(result.pass_)
+
+    def test_action_input_matches_portable_command(self):
+        a = {
+            "kind": "action_input_matches",
+            "action": "command",
+            "field": "command",
+            "pattern": r"marketing-cloud-growth",
+            "because": "portable command assertion",
+        }
+        result = synthesis_eval.evaluate_assertion(a, self.parsed)
+        self.assertTrue(result.pass_)
+
+    def test_action_sequence_includes_portable_names(self):
+        a = {
+            "kind": "action_sequence_includes",
+            "pattern": r"skill\ncommand\nread\nread",
+            "because": "portable action order",
+        }
+        result = synthesis_eval.evaluate_assertion(a, self.parsed)
+        self.assertTrue(result.pass_)
+
+    def test_artifact_content_matches_path_and_content(self):
+        parsed = synthesis_eval.ParsedTranscript(
+            artifacts=[
+                Artifact(
+                    path="scripts/demo.sh",
+                    content="#!/bin/sh\nprintf demo\n",
+                ),
+            ],
+        )
+        a = {
+            "kind": "artifact_content_matches",
+            "path": r"\.sh$",
+            "pattern": r"printf demo",
+            "because": "generated script contract",
+        }
+        result = synthesis_eval.evaluate_assertion(a, parsed)
+        self.assertTrue(result.pass_)
 
 
 class TestValidateFixtures(unittest.TestCase):

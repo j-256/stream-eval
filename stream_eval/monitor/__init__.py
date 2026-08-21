@@ -31,8 +31,7 @@ def main(argv=None):
     p_serve.add_argument("--port", type=int, default=8765)
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--session", default=None,
-                         help="pin to a specific Claude Code session by "
-                              "name or UUID prefix")
+                         help="label the dashboard with an agent session id")
     p_serve.add_argument("--open", action="store_true",
                          help="open the dashboard in the default browser")
 

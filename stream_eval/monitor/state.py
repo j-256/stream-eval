@@ -16,6 +16,7 @@ from typing import Optional
 
 import os
 
+from stream_eval.agents import DEFAULT_AGENT
 from stream_eval.monitor.parsing import (
     parse_finish_banner,
     parse_progress_line,
@@ -41,6 +42,7 @@ class DashboardCell:
 class DashboardRow:
     skill: str
     kind: str
+    agent: str
     total_fixtures: int
     runs: int
     cells: list = field(default_factory=list)
@@ -48,7 +50,7 @@ class DashboardRow:
     # banners (pre-F.5) -- those rows render with `status="unknown"` and
     # no per-row controls. Used to bind worker-control buttons to the
     # right /tmp/stream-eval-<pid>.sock and to discover this row's
-    # claude pids in psutil for the inline Active Workers table.
+    # agent pids in psutil for the inline Active Workers table
     harness_pid: Optional[int] = None
     # Status state machine: "active" / "completed" / "aborted" /
     # "unknown".
@@ -132,6 +134,7 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
                     DashboardRow(
                         skill=banner["skill"],
                         kind=banner["kind"],
+                        agent=banner["agent"],
                         total_fixtures=banner["total_fixtures"],
                         runs=banner["runs"],
                         harness_pid=banner["pid"],
@@ -174,6 +177,7 @@ def build_state(output_paths, *, is_pid_alive=None, per_skill_cap=None):
                 current_key,
                 DashboardRow(
                     skill=current_key[0], kind=current_key[1],
+                    agent=DEFAULT_AGENT,
                     total_fixtures=0, runs=0,
                     harness_pid=current_key[2],
                     mtime=mtime,

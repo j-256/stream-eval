@@ -1,19 +1,20 @@
 <div class="row" data-status="{{ row.status }}">
   <div class="row-header">
     <span class="skill">{{ row.skill }}</span>
+    <span class="kind">{{ row.agent }}</span>
     <span class="kind">{{ row.kind }}</span>
     <span class="status status-{{ row.status }}">{{ row.status }}</span>
     {% if row.harness_pid is not none %}
       <span class="harness-pid">pid {{ row.harness_pid }}</span>
     {% endif %}
     {% if row.status == "active" %}
-      <span class="in-flight-stat" title="{{ row.in_flight_count }} claude pids running{% if row.total_retries %}; {{ row.total_retries }} api_retry events seen so far (cumulative across all runs, not just live ones){% endif %}">
+      <span class="in-flight-stat" title="{{ row.in_flight_count }} agent processes running{% if row.total_retries %}; {{ row.total_retries }} retry events seen so far (cumulative across all runs, not just live ones){% endif %}">
         {{ row.in_flight_count }} in flight{% if row.total_retries %}, {{ row.total_retries }} retries{% endif %}
       </span>
     {% elif row.total_retries %}
       {# Completed/aborted rows: surface the cumulative retry count so a
          run that fought throttling is visible after it finishes. #}
-      <span class="in-flight-stat" title="{{ row.total_retries }} api_retry events across all runs">
+      <span class="in-flight-stat" title="{{ row.total_retries }} retry events across all runs">
         {{ row.total_retries }} retries
       </span>
     {% endif %}

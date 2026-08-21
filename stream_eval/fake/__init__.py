@@ -27,8 +27,8 @@ Public surface:
 Run interactively:
     python3 -m stream_eval.fake <scenario>
 
-The fake has no relationship to real harnesses: it does not spawn
-claude -p, it does not invoke run_eval, it never writes results.json.
+The fake has no relationship to real harnesses: it does not spawn an
+agent CLI, it does not invoke run_eval, and it never writes results.json.
 The fake pids are arbitrary integers chosen to not collide with
 likely real pids on the host (>= 90000) but the fake socket files
 live next to real ones in /tmp -- closing FakeState removes them.

@@ -14,7 +14,7 @@ from stream_eval.pool import (
 
 
 class FakeWorker:
-    """In-process stand-in for a `claude -p` subprocess. Sleeps for
+    """In-process stand-in for an agent CLI subprocess. Sleeps for
     `duration` seconds, then 'completes.' Tests use this instead of
     real subprocesses so they're fast and deterministic."""
     def __init__(self, task, duration=0.05):
