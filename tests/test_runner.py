@@ -13,6 +13,7 @@ from stream_eval.runner import (
     assign_fixture_ids,
     FixtureSchemaError,
     _capture_transcript_artifacts,
+    _dsc_reference_urls,
     _format_progress,
     _prewarm_dsc_cache,
     PROGRESS_LINE_RE,
@@ -108,6 +109,18 @@ class TestPrewarmDscCache(unittest.TestCase):
                 _prewarm_dsc_cache([{"query": "prose about shopper-orders, no url"}],
                                    lambda fx: fx["query"], skill)
                 run.assert_not_called()
+
+    def test_reference_parser_handles_punctuation_and_adversarial_input(self):
+        base = "https://developer.salesforce.com/docs/commerce/commerce-api/references"
+        query = (
+            f"See ({base}/shopper-orders?meta=createOrder), then "
+            + "https://developer.salesforce.com/docs/" * 10_000
+        )
+
+        self.assertEqual(
+            list(_dsc_reference_urls(query)),
+            [f"{base}/shopper-orders"],
+        )
 
 
 class TestAssignFixtureIds(unittest.TestCase):

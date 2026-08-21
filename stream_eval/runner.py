@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from stream_eval.agents import DEFAULT_AGENT, get_agent_adapter
 from stream_eval.pool import Dispatcher, DispatcherState
@@ -1142,12 +1143,52 @@ class _SubprocessWorker:
             self._thread.join(timeout=timeout)
 
 
-# DSC reference URLs embedded in fixture queries. Trigger fixtures carry them
-# explicitly; prose-only synthesis fixtures won't match and fall back to the
-# shared-cache warming that compounds across runs
-_DSC_REF_URL_RE = re.compile(
-    r"https?://developer\.salesforce\.com/docs/\S+?/references/[A-Za-z0-9._-]+"
+_DSC_REF_SCHEMES = ("http", "https")
+_DSC_REF_HOST = "developer.salesforce.com"
+_DSC_REF_PATH_PREFIX = "/docs/"
+_DSC_REF_MARKER = "/references/"
+_DSC_REF_NAME_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
 )
+_DSC_REF_URL_PREFIXES = tuple(
+    f"{scheme}://{_DSC_REF_HOST}{_DSC_REF_PATH_PREFIX}"
+    for scheme in _DSC_REF_SCHEMES
+)
+
+
+def _dsc_reference_urls(query):
+    """Yield canonical DSC reference roots embedded in a fixture query"""
+    for token in query.split():
+        starts = [token.find(prefix) for prefix in _DSC_REF_URL_PREFIXES]
+        starts = [start for start in starts if start >= 0]
+        if not starts:
+            continue
+        candidate = token[min(starts):]
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            continue
+        if parsed.scheme not in _DSC_REF_SCHEMES or parsed.netloc != _DSC_REF_HOST:
+            continue
+        marker_start = parsed.path.find(
+            _DSC_REF_MARKER,
+            len(_DSC_REF_PATH_PREFIX),
+        )
+        if marker_start <= len(_DSC_REF_PATH_PREFIX):
+            continue
+        name_start = marker_start + len(_DSC_REF_MARKER)
+        name_end = name_start
+        while (
+            name_end < len(parsed.path)
+            and parsed.path[name_end] in _DSC_REF_NAME_CHARS
+        ):
+            name_end += 1
+        if name_end == name_start:
+            continue
+        yield (
+            f"{parsed.scheme}://{_DSC_REF_HOST}"
+            f"{parsed.path[:name_end]}"
+        )
 
 
 def _prewarm_dsc_cache(fixtures, get_query, skill_path):
@@ -1171,8 +1212,7 @@ def _prewarm_dsc_cache(fixtures, get_query, skill_path):
             query = get_query(fx) or ""
         except Exception:
             continue
-        for hit in _DSC_REF_URL_RE.findall(query):
-            root = hit.split("?", 1)[0].rstrip("/.,)")
+        for root in _dsc_reference_urls(query):
             if root not in seen:
                 seen.add(root)
                 urls.append(root)
