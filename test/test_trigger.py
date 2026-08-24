@@ -1,6 +1,6 @@
 """Unit tests for stream_eval/trigger.py.
 
-Run with: pytest tests/test_trigger.py
+Run with: pytest test/test_trigger.py
 """
 import json
 import tempfile

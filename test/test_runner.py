@@ -1,6 +1,6 @@
 """Unit tests for stream_eval/runner.py.
 
-Run with: pytest tests/test_runner.py
+Run with: pytest test/test_runner.py
 """
 import json
 import os
@@ -773,7 +773,7 @@ class TestWorktreeIsolationPrimitives(unittest.TestCase):
     git's actual semantics.
 
     Reason this lives in tools/test_eval_runner.py rather than under
-    skills/_shared/tests/run.sh: this is harness/python plumbing, not
+    skills/_shared/test/run.sh: this is harness/python plumbing, not
     skill-shared JS.
     """
 

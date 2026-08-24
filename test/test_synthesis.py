@@ -1,6 +1,6 @@
 """Unit tests for stream_eval/synthesis.py.
 
-Run with: pytest tests/test_synthesis.py
+Run with: pytest test/test_synthesis.py
 """
 import json
 import tempfile

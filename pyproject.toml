@@ -41,5 +41,5 @@ where = ["."]
 include = ["stream_eval*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["test"]
 python_files = ["test_*.py"]

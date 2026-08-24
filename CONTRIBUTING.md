@@ -41,7 +41,7 @@ pip install -e .[dev]
 
 ```bash
 pytest                       # full suite
-pytest tests/test_<module>.py  # one file
+pytest test/test_<module>.py  # one file
 pytest -k "isolation"        # by name pattern
 pytest -v                    # verbose
 ```
@@ -52,7 +52,7 @@ Tests that need a real agent CLI invocation are marked with `@pytest.mark.integr
 
 - Python 3.11+. Type hints encouraged but not enforced.
 - ASCII-only in source code, comments, and docstrings.
-- Test files mirror module names: `tests/test_<module>.py`.
+- Test files mirror module names: `test/test_<module>.py`.
 - One concern per test file when practical.
 
 ## Commit message style

@@ -11,7 +11,7 @@ Adding a scenario:
    builder.start_eval(...) and builder.complete_run(...) /
    builder.finish_eval(...) as needed.
 2. Register it in SCENARIOS at the bottom.
-3. Add a test in tests/test_fake.py.
+3. Add a test in test/test_fake.py.
 
 The dashboard reads .output files from stream-eval state directories via
 ps._output_paths -> find_output_files. The interactive entry point places
