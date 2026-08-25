@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ "$#" -ne 0 ]; then
+    printf 'Usage: scripts/release-check\n' >&2
+    exit 2
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+cd "$REPO_DIR"
+pytest
