@@ -67,6 +67,6 @@ Conventional Commits:
 
 ## Versioning
 
-SemVer. Pre-1.0 (`0.x.y`) for the entire pre-stable phase.
-Breaking changes increment minor; bug fixes increment patch.
-`CHANGELOG.md` updated for every release.
+Use SemVer. The pre-stable phase is every `0.y.z` release before `1.0.0`. These releases are intended for real use, but compatibility across minor versions is not guaranteed. Breaking changes and backward-compatible features increment `y`; backward-compatible fixes increment `z`. Version `1.0.0` begins the stable phase, when documented public interfaces receive SemVer compatibility guarantees.
+
+Update `CHANGELOG.md` for every release. Before publishing, run `scripts/release-check` from a clean neutral `main` checkout.

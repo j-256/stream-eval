@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-25
+
 ### Added
 - Claude Code, Codex, and OpenCode adapters behind the shared `--agent` interface.
 - Portable transcript actions and cross-agent synthesis assertions for action inputs, action sequences, and generated artifacts.
