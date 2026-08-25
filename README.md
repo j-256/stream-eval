@@ -2,6 +2,8 @@
 
 Deterministic trigger and synthesis evaluation for Agent Skills. stream-eval runs the same fixture format against Claude Code, Codex, or OpenCode, normalizes each native JSONL transcript into portable actions, and records the selected agent and model with every result.
 
+![The stream-eval live dashboard comparing concurrent runs, assertions, token use, timing, and failures](docs/screenshots/cover.png)
+
 ## Install
 
 For a global installation with [pipx](https://pipx.pypa.io/stable/how-to/install-pipx/):
