@@ -23,17 +23,22 @@ from stream_eval.fake import SCENARIOS, make_fake_state
 from stream_eval.paths import state_dir
 
 
-def main(argv=None):
+def build_argument_parser():
     ap = argparse.ArgumentParser(prog="python3 -m stream_eval.fake")
     ap.add_argument(
         "scenario", nargs="?",
         help="scenario name, comma-separated list, or 'all' / 'list'",
     )
     ap.add_argument(
-        "--base-dir",
+        "-b", "--base-dir",
         help="write .output files here instead of "
              "the stream-eval state directory",
     )
+    return ap
+
+
+def main(argv=None):
+    ap = build_argument_parser()
     args = ap.parse_args(argv)
 
     if not args.scenario or args.scenario == "list":

@@ -15,6 +15,23 @@ Internal modules (NOT public API):
 import argparse
 
 
+def build_argument_parser():
+    parser = argparse.ArgumentParser(prog="stream-eval monitor")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_serve = sub.add_parser("serve", help="start the Flask app")
+    p_serve.add_argument("-p", "--port", type=int, default=8765)
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("-s", "--session", default=None,
+                         help="label the dashboard with an agent session id")
+    p_serve.add_argument("-o", "--open", action="store_true",
+                         help="open the dashboard in the default browser")
+
+    p_summary = sub.add_parser("summary", help="one-shot CLI summary")
+    p_summary.add_argument("-s", "--session", default=None)
+    return parser
+
+
 def main(argv=None):
     """CLI entry point for `stream-eval monitor`.
 
@@ -24,20 +41,7 @@ def main(argv=None):
 
     If no subcommand is given, defaults to 'summary'.
     """
-    parser = argparse.ArgumentParser(prog="stream-eval monitor")
-    sub = parser.add_subparsers(dest="cmd")
-
-    p_serve = sub.add_parser("serve", help="start the Flask app")
-    p_serve.add_argument("--port", type=int, default=8765)
-    p_serve.add_argument("--host", default="127.0.0.1")
-    p_serve.add_argument("--session", default=None,
-                         help="label the dashboard with an agent session id")
-    p_serve.add_argument("--open", action="store_true",
-                         help="open the dashboard in the default browser")
-
-    p_summary = sub.add_parser("summary", help="one-shot CLI summary")
-    p_summary.add_argument("--session", default=None)
-
+    parser = build_argument_parser()
     args = parser.parse_args(argv)
     cmd = args.cmd or "summary"
 

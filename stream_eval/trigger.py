@@ -151,16 +151,17 @@ def score_trigger_run(fixture, transcript_path, bail, *, target_skill):
     }
 
 
-def main(argv=None):
+def build_argument_parser():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--eval", required=True, help="Path to trigger-eval.json")
-    ap.add_argument("--skill-path", required=False,
+    ap.add_argument("-e", "--eval", required=True,
+                    help="Path to trigger-eval.json")
+    ap.add_argument("-s", "--skill-path", required=False,
                     help="Path to the skill directory (containing SKILL.md). "
                          "Required for the default 'isolated' profile; the "
                          "skill name is read from SKILL.md frontmatter. "
                          "Optional for 'restricted' or 'inherit' profiles, "
                          "which test the user's globally-installed skill.")
-    ap.add_argument("--also-install", action="append", default=[],
+    ap.add_argument("-i", "--also-install", action="append", default=[],
                     metavar="PATH",
                     help="Path to a sibling skill to install alongside the "
                          "skill under test. May be repeated. Only effective "
@@ -168,17 +169,17 @@ def main(argv=None):
     ap.add_argument("--skill-name", required=False, default=None,
                     help="Override the skill name. Default: read from "
                          "SKILL.md frontmatter when --skill-path is given.")
-    ap.add_argument("--runs", type=int, default=3)
-    ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--timeout", type=int, default=300,
+    ap.add_argument("-r", "--runs", type=int, default=3)
+    ap.add_argument("-w", "--workers", type=int, default=4)
+    ap.add_argument("-t", "--timeout", type=int, default=300,
                     help="Per-run wall-clock backstop in seconds "
                          "(default 300). Measures effective model-thinking "
                          "time; adapter-reported retry-backoff windows are "
                          "excluded.")
-    ap.add_argument("--cwd", default=None,
+    ap.add_argument("-c", "--cwd", default=None,
                     help="CWD for agent subprocesses (default: current dir)")
     ap.add_argument(
-        "--agent",
+        "-a", "--agent",
         choices=SUPPORTED_AGENTS,
         default=os.environ.get("STREAM_EVAL_AGENT", DEFAULT_AGENT),
         help=(
@@ -187,7 +188,7 @@ def main(argv=None):
         ),
     )
     ap.add_argument(
-        "--profile", choices=SUPPORTED_PROFILES,
+        "-p", "--profile", choices=SUPPORTED_PROFILES,
         default=os.environ.get("STREAM_EVAL_PROFILE", "isolated"),
         help="Isolation profile for the spawned agent. 'isolated' "
              "(default) uses a temp HOME with only the skill under test; "
@@ -195,7 +196,12 @@ def main(argv=None):
              "subagents; "
              "'inherit' runs with the user's full environment.",
     )
-    ap.add_argument("--out", required=True)
+    ap.add_argument("-o", "--out", required=True)
+    return ap
+
+
+def main(argv=None):
+    ap = build_argument_parser()
     args = ap.parse_args(argv)
 
     from stream_eval.isolation import parse_skill_md_name

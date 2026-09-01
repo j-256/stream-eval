@@ -276,24 +276,26 @@ def score_synthesis_run(fixture, transcript_path, bail):
     }
 
 
-def main(argv=None):
+def build_argument_parser():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--eval", required=True, help="Path to synthesis-eval.json")
-    ap.add_argument("--out", required=True, help="Path to write results JSON")
-    ap.add_argument("--runs", type=int, default=5,
+    ap.add_argument("-e", "--eval", required=True,
+                    help="Path to synthesis-eval.json")
+    ap.add_argument("-o", "--out", required=True,
+                    help="Path to write results JSON")
+    ap.add_argument("-r", "--runs", type=int, default=5,
                     help="Runs per fixture (default 5)")
-    ap.add_argument("--lenient", action="store_true",
+    ap.add_argument("-l", "--lenient", action="store_true",
                     help="Pass if majority of runs pass (default: strict -- "
                          "all runs must pass)")
-    ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--timeout", type=int, default=300,
+    ap.add_argument("-w", "--workers", type=int, default=4)
+    ap.add_argument("-t", "--timeout", type=int, default=300,
                     help="Per-run wall-clock backstop in seconds "
                          "(default 300). Measures effective model-thinking "
                          "time; adapter-reported retry-backoff windows are "
                          "excluded.")
-    ap.add_argument("--cwd", default=None)
+    ap.add_argument("-c", "--cwd", default=None)
     ap.add_argument(
-        "--agent",
+        "-a", "--agent",
         choices=SUPPORTED_AGENTS,
         default=os.environ.get("STREAM_EVAL_AGENT", DEFAULT_AGENT),
         help=(
@@ -302,7 +304,7 @@ def main(argv=None):
         ),
     )
     ap.add_argument(
-        "--profile", choices=SUPPORTED_PROFILES,
+        "-p", "--profile", choices=SUPPORTED_PROFILES,
         default=os.environ.get("STREAM_EVAL_PROFILE", "isolated"),
         help="Isolation profile for the spawned agent. 'isolated' "
              "(default) uses a temp HOME with only the skill under test; "
@@ -310,10 +312,10 @@ def main(argv=None):
              "subagents; "
              "'inherit' runs with the user's full environment.",
     )
-    ap.add_argument("--skill-path", required=False,
+    ap.add_argument("-s", "--skill-path", required=False,
                     help="Path to the skill directory (containing SKILL.md). "
                          "Required for the default 'isolated' profile.")
-    ap.add_argument("--also-install", action="append", default=[],
+    ap.add_argument("-i", "--also-install", action="append", default=[],
                     metavar="PATH",
                     help="Path to a sibling skill to install alongside the "
                          "skill under test. May be repeated.")
@@ -321,6 +323,11 @@ def main(argv=None):
                     help="Override the skill name. Default: read from "
                          "SKILL.md frontmatter when --skill-path is given, "
                          "else from the --eval JSON's parent directory name.")
+    return ap
+
+
+def main(argv=None):
+    ap = build_argument_parser()
     args = ap.parse_args(argv)
 
     from stream_eval.isolation import parse_skill_md_name

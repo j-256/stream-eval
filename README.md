@@ -210,19 +210,19 @@ Common options:
 
 | Flag | Description |
 |---|---|
-| `--agent {claude,codex,opencode}` | Adapter to run; defaults to `STREAM_EVAL_AGENT` or `claude` |
-| `--eval PATH` | Trigger or synthesis fixture file |
-| `--out PATH` | Results JSON destination |
-| `--skill-path PATH` | Skill directory containing `SKILL.md`; required by `isolated` |
+| `-a, --agent {claude,codex,opencode}` | Adapter to run; defaults to `STREAM_EVAL_AGENT` or `claude` |
+| `-e, --eval PATH` | Trigger or synthesis fixture file |
+| `-o, --out PATH` | Results JSON destination |
+| `-s, --skill-path PATH` | Skill directory containing `SKILL.md`; required by `isolated` |
 | `--skill-name NAME` | Override or supply the target skill name |
-| `--also-install PATH` | Install a sibling skill in the isolated home; repeatable |
-| `--profile PROFILE` | `isolated`, `restricted`, or `inherit` |
-| `--runs N` | Runs per fixture |
-| `--workers N` | Concurrent agent CLI subprocesses |
-| `--timeout SECONDS` | Effective per-run timeout |
-| `--cwd PATH` | Repository used to create disposable worktrees |
+| `-i, --also-install PATH` | Install a sibling skill in the isolated home; repeatable |
+| `-p, --profile PROFILE` | `isolated`, `restricted`, or `inherit` |
+| `-r, --runs N` | Runs per fixture |
+| `-w, --workers N` | Concurrent agent CLI subprocesses |
+| `-t, --timeout SECONDS` | Effective per-run timeout |
+| `-c, --cwd PATH` | Repository used to create disposable worktrees |
 
-Synthesis also accepts `--lenient`, which changes its default all-runs requirement to a majority-pass requirement.
+Synthesis also accepts `-l, --lenient`, which changes its default all-runs requirement to a majority-pass requirement. `--skill-name` remains long-only because `-s` selects the more common skill path.
 
 Profiles:
 
@@ -275,6 +275,8 @@ stream-eval monitor serve --port 8765
 stream-eval monitor serve --open
 ```
 
+The monitor accepts `-p, --port`, `-s, --session`, and `-o, --open`. `--host` remains long-only because `-h` is reserved for help.
+
 The dashboard shows the adapter, status, segmented per-run progress, active subprocesses, retry telemetry when available, recent completions, and per-harness worker controls. It recognizes `claude`, `codex`, and `opencode` child processes by exact executable basename.
 
 New output ledgers live under `STREAM_EVAL_STATE_DIR`, then `$XDG_STATE_HOME/stream-eval`, or finally `~/.local/state/stream-eval`. The monitor also reads legacy `.output` files under `~/.claude/projects` so upgrades retain historical rows.
@@ -292,7 +294,7 @@ stream-eval fake concurrent,over-cap,legacy
 stream-eval fake all
 ```
 
-Interactive fakes are written below the primary stream-eval state directory and removed on exit. Programmatic callers can use `make_fake_state` as a context manager.
+Interactive fakes are written below the primary stream-eval state directory and removed on exit. Use `-b, --base-dir` to select another state directory. Programmatic callers can use `make_fake_state` as a context manager.
 
 ## Configuration
 
