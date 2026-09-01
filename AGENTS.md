@@ -10,7 +10,7 @@ stream-eval is a measurement harness. Preserve reproducibility and comparability
 
 - In a hosted clone, create topic branches from `source` and target contributions back to `source`.
 - Treat hosted `main` as a generated distribution tip that may be replaced after publication. Do not author on it or merge it into neutral source history.
-- Keep source content host-agnostic. Preserve the `<repo-url>` placeholder; the publication workflow supplies the concrete clone URL.
+- Keep source content host-agnostic. Preserve the `https://github.com/j-256/stream-eval.git` placeholder; the publication workflow supplies the concrete clone URL.
 - Before release work, confirm that the checkout represents the neutral source history described in `CONTRIBUTING.md`.
 - Publication and release operations mutate remote state. Do not run them without explicit authorization, and use the repository's owning publication workflow rather than direct pushes.
 

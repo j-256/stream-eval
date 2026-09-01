@@ -9,13 +9,13 @@ Deterministic trigger and synthesis evaluation for Agent Skills. stream-eval run
 For a global installation with [pipx](https://pipx.pypa.io/stable/how-to/install-pipx/):
 
 ```bash
-pipx install git+<repo-url>
+pipx install git+https://github.com/j-256/stream-eval.git
 ```
 
 For development:
 
 ```bash
-git clone <repo-url> stream-eval
+git clone https://github.com/j-256/stream-eval.git stream-eval
 cd stream-eval
 python3 -m venv .venv
 source .venv/bin/activate
