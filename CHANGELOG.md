@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-01
+
+### Added
+
+- Short option aliases for the trigger, synthesis, monitor, and fake-agent command-line interfaces.
+
 ## [0.2.0] - 2026-08-25
 
 ### Added
