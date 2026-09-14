@@ -321,6 +321,10 @@ The harness loads `.env` from the working repository without replacing existing 
 - Skill activation is explicit in Claude and OpenCode transcripts and inferred from the target `SKILL.md` read in Codex transcripts
 - Model identifiers and effort values are adapter-specific even though the environment variable names are shared
 
+## Project cover
+
+The [cover workflow](docs/screenshots/README.md) renders the actual project with synthetic fixtures. Release checks and source validation regenerate a review artifact, and publication preparation records the canonical cover alongside its source inputs.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

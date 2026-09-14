@@ -10,4 +10,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_DIR"
-pytest
+if [ -z "${COVER_PYTHON-}" ] && [ -x "$REPO_DIR/.venv/bin/python" ]; then
+    COVER_PYTHON="$REPO_DIR/.venv/bin/python"
+    export COVER_PYTHON
+fi
+"${COVER_PYTHON:-python3}" -m pytest
+
+node --test tools/cover/freshness.test.mjs
+scripts/prepare-cover --check
+cover_artifact_dir="$(mktemp -d "${TMPDIR:-/tmp}/project-cover-check.XXXXXX")"
+trap 'rm -rf "$cover_artifact_dir"' EXIT
+scripts/prepare-cover --output "${COVER_OUTPUT:-$cover_artifact_dir/cover.png}"
