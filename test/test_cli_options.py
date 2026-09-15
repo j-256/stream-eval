@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from stream_eval.fake.__main__ import build_argument_parser as fake_parser
@@ -70,13 +72,13 @@ def test_fake_short_options_match_long_options():
 
 def test_help_documents_short_options_and_collision_exceptions(capsys):
     trigger_help = trigger_parser().format_help()
-    assert "-e, --eval EVAL" in trigger_help
-    assert "-s, --skill-path SKILL_PATH" in trigger_help
+    assert re.search(r"-e(?: EVAL)?, --eval EVAL\b", trigger_help)
+    assert re.search(r"-s(?: SKILL_PATH)?, --skill-path SKILL_PATH\b", trigger_help)
     assert "--skill-name SKILL_NAME" in trigger_help
 
     with pytest.raises(SystemExit) as exit_info:
         monitor_parser().parse_args(["serve", "--help"])
     assert exit_info.value.code == 0
     monitor_help = capsys.readouterr().out
-    assert "-p, --port PORT" in monitor_help
+    assert re.search(r"-p(?: PORT)?, --port PORT\b", monitor_help)
     assert "--host HOST" in monitor_help
